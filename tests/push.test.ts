@@ -106,6 +106,28 @@ describe('push', () => {
   });
 });
 
+describe('push pushed flag', () => {
+  it('clears pushed while an extra batch is unfinished and sets it again when done', async () => {
+    const linear = new FakeLinear();
+    const everhour = new FakeEverhour();
+    const d = readyDraft();
+    await push(d, { linear, everhour, config: testConfig(), save: () => {}, newUuid });
+    expect(d.pushed).toBe(true);
+    d.items.push(makeItem({ id: 'e', day: '2026-10-05', project: 'Boxsy', hours: 1 }));
+    d.totalHours = 9.5;
+    syncParents(d);
+    everhour.autoSync = false;
+    const saves: boolean[] = [];
+    const r = await push(d, { linear, everhour, config: testConfig(), save: x => { saves.push(x.pushed); }, newUuid });
+    expect(r.status).toBe('awaiting_sync');
+    expect(saves[0]).toBe(false);
+    expect(d.pushed).toBe(false);
+    everhour.autoSync = true;
+    await push(d, { linear, everhour, config: testConfig(), save: () => {}, newUuid });
+    expect(d.pushed).toBe(true);
+  });
+});
+
 describe('pool', () => {
   it('after a failure starts nothing new and waits for in-flight items before rejecting', async () => {
     const started: number[] = [];

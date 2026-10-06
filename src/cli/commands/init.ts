@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 import * as p from '@clack/prompts';
 import pc from 'picocolors';
@@ -15,10 +16,16 @@ const bail = <T>(v: T): Exclude<T, symbol> => {
   return v as Exclude<T, symbol>;
 };
 
+/** `my-timesheet@<version>` of the package at pkgRoot, so init installs exactly the version that is running. */
+export function installSpec(pkgRoot: string): string {
+  const { version } = JSON.parse(fs.readFileSync(path.join(pkgRoot, 'package.json'), 'utf8')) as { version: string };
+  return `my-timesheet@${version}`;
+}
+
 function stablePackageRoot(): string {
   const here = packageRoot();
   if (!here.includes(`${path.sep}_npx${path.sep}`)) return here;
-  execFileSync('npm', ['install', '-g', 'my-timesheet'], { stdio: 'inherit' });
+  execFileSync('npm', ['install', '-g', installSpec(here)], { stdio: 'inherit' });
   return path.join(execFileSync('npm', ['root', '-g'], { encoding: 'utf8' }).trim(), 'my-timesheet');
 }
 

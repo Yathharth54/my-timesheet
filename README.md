@@ -34,4 +34,4 @@ npx my-timesheet init      # once: keys, projects, work orgs, hooks
 | `timesheet doctor` | check keys, hooks and tools |
 | `timesheet uninstall [--purge]` | remove hooks (and data) |
 
-Keys live in the macOS Keychain. Everything else is in `~/.timesheet/`. Nothing is sent anywhere until you press push.
+Keys live in the macOS Keychain. Everything else is in `~/.timesheet/`. Nothing is written to Linear or Everhour until you push. Before that, Distribute sends item titles, descriptions and evidence counts to Claude via `claude -p`, and the review page reads your week's Everhour total.

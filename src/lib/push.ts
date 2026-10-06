@@ -76,6 +76,11 @@ export async function push(draft: Draft, deps: PushDeps): Promise<PushResult> {
   };
 
   const pending: Item[] = draft.items.filter(i => !i.deleted && !i.everhour?.logged);
+  if (pending.length && draft.pushed) {
+    // An extra batch is unfinished until it's done, so status, History and the nudge show it.
+    draft.pushed = false;
+    deps.save(draft);
+  }
   syncParents(draft);
 
   const keys = [...new Set(pending.map(i => parentKey(i.day, i.project!)))];

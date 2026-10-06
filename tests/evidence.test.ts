@@ -5,11 +5,11 @@ import { execFileSync } from 'node:child_process';
 import { tmpDir, makeItem } from './helpers.js';
 import { gitCommits, statsFor } from '../src/lib/evidence.js';
 
-function commit(repo: string, email: string, iso: string, file: string, lines: number) {
+function commit(repo: string, email: string, iso: string, file: string, lines: number, committerIso = iso) {
   fs.writeFileSync(path.join(repo, file), 'x\n'.repeat(lines));
   execFileSync('git', ['-C', repo, 'add', '.']);
   execFileSync('git', ['-C', repo, '-c', `user.email=${email}`, '-c', 'user.name=n', 'commit', '-q', '-m', `add ${file}`], {
-    env: { ...process.env, GIT_AUTHOR_DATE: iso, GIT_COMMITTER_DATE: iso },
+    env: { ...process.env, GIT_AUTHOR_DATE: iso, GIT_COMMITTER_DATE: committerIso },
   });
 }
 
@@ -33,6 +33,15 @@ describe('gitCommits', () => {
     const cs = gitCommits(repo, 'TheAgenticAI/demo', ['me@x.ai'], new Date('2026-10-05T00:00:00Z'), new Date('2026-10-12T00:00:00Z'));
     expect(cs).toHaveLength(1);
     expect(cs[0].subject).toBe('add correct.txt');
+  });
+
+  it('keeps commits authored in the week but rebased (committed) after it', () => {
+    const repo = tmpDir();
+    execFileSync('git', ['-C', repo, 'init', '-q', '-b', 'main']);
+    commit(repo, 'me@x.ai', '2026-10-09T10:00:00Z', 'rebased.txt', 1, '2026-10-13T09:00:00Z');
+    commit(repo, 'me@x.ai', '2026-10-12T09:00:00Z', 'next.txt', 1, '2026-10-12T09:00:00Z');
+    const cs = gitCommits(repo, 'r', ['me@x.ai'], new Date('2026-10-05T00:00:00Z'), new Date('2026-10-12T00:00:00Z'));
+    expect(cs.map(c => c.subject)).toEqual(['add rebased.txt']);
   });
 
   it('returns [] for a non-repo or no authors', () => {

@@ -5,9 +5,12 @@ import type { Commit, Item, WeekEvidence } from './types.js';
 export function gitCommits(root: string, repo: string, authors: string[], from: Date, to: Date): Commit[] {
   if (!authors.length) return [];
   const authorLower = authors.map(a => a.toLowerCase());
+  // git filters --since/--until on committer date; widen by 3 days so commits rebased after the week still show,
+  // then keep the exact [from, to) window on author date below.
+  const PAD = 3 * 86400000;
   const args = [
     '-C', root, 'log', '--all', '--no-merges',
-    `--since=${from.toISOString()}`, `--until=${to.toISOString()}`,
+    `--since=${new Date(from.getTime() - PAD).toISOString()}`, `--until=${new Date(to.getTime() + PAD).toISOString()}`,
     '--format=%x1e%H%x1f%aI%x1f%ae%x1f%s', '--numstat', '--no-renames',
   ];
   let out: string;
