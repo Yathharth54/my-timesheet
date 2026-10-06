@@ -79,7 +79,10 @@ async function save() {
 
 async function act(url, body) {
   await save();
-  try { accept(await api('POST', url, { week: state.week, ...body })); } catch (e) { flash(e.message); }
+  try { accept(await api('POST', url, { week: state.week, ...body })); } catch (e) {
+    if (e.status === 409) await load(state.week).catch(() => {});
+    flash(e.message);
+  }
 }
 
 const live = () => state.draft.items.filter(i => !i.deleted);

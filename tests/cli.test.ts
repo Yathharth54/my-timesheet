@@ -4,6 +4,7 @@ import path from 'node:path';
 import { execSync, spawnSync } from 'node:child_process';
 import { tmpDir, tmpHome, testConfig } from './helpers.js';
 import { saveConfig, loadRepos, saveDraft, emptyDraft } from '../src/lib/store.js';
+import { acquireWeekLock } from '../src/lib/lock.js';
 
 const cli = (args: string[], cwd = process.cwd()) =>
   spawnSync('node', [path.resolve('dist/cli/index.js'), ...args], { cwd, env: { ...process.env }, encoding: 'utf8' });
@@ -34,5 +35,16 @@ describe('timesheet CLI', () => {
     saveConfig(testConfig());
     saveDraft(emptyDraft('2026-W41'));
     expect(cli(['status', '--week', '2026-W41']).stdout).toMatch(/2026-W41 · 0\.0h · 0 items · not pushed/);
+  });
+
+  it('push refuses to run while the week is locked', () => {
+    saveConfig(testConfig());
+    saveDraft(emptyDraft('2026-W41'));
+    const release = acquireWeekLock('2026-W41');
+    try {
+      const r = cli(['push', '--week', '2026-W41']);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toMatch(/Week 2026-W41 is busy/);
+    } finally { release(); }
   });
 });

@@ -10,6 +10,7 @@ import { syncParents } from '../lib/parents.js';
 import { runClaude, runDistribute, type ClaudeRunner } from '../lib/weights.js';
 import { addManualItem, deleteItem, mechanicalSplit, mergeItems, setHours, splitItem } from '../lib/edit.js';
 import { push } from '../lib/push.js';
+import { acquireWeekLock } from '../lib/lock.js';
 import type { LinearApi } from '../lib/linear.js';
 import type { EverhourApi } from '../lib/everhour.js';
 import type { Draft, RepoClass, Warning, WeekEvidence } from '../lib/types.js';
@@ -65,6 +66,7 @@ export function createServer(deps: ServerDeps = {}): http.Server {
   const assertNotPushing = (week: string) => {
     if (pushStates.get(week)?.status === 'running') throw new ApiError(423, 'A push is running for this week. Wait for it to finish.');
   };
+  const busy = (e: unknown) => new ApiError(423, (e as Error).message);
   const wrap = <T>(fn: () => T): T => { try { return fn(); } catch (e) { throw e instanceof ApiError ? e : new ApiError(400, (e as Error).message); } };
 
   function putDraft(incoming: Draft) {
@@ -116,6 +118,8 @@ export function createServer(deps: ServerDeps = {}): http.Server {
 
   function startPush(week: string) {
     if (pushStates.get(week)?.status === 'running') throw new ApiError(409, 'A push is already running.');
+    let release: () => void;
+    try { release = acquireWeekLock(week); } catch (e) { throw busy(e); }
     pushStates.set(week, { status: 'running', phase: 'parents', done: 0, total: 0 });
     void (async () => {
       try {
@@ -129,6 +133,8 @@ export function createServer(deps: ServerDeps = {}): http.Server {
         ehCache.delete(week);
       } catch (e) {
         pushStates.set(week, { status: 'error', error: (e as Error).message });
+      } finally {
+        release();
       }
     })();
   }
@@ -168,9 +174,16 @@ export function createServer(deps: ServerDeps = {}): http.Server {
           const w = resolveWeek(b.week, now());
           assertNotPushing(w);
           const evidence = readJson<WeekEvidence>(paths.evidence(w), { commits: {}, sessions: {} });
-          let out: Draft;
-          try { out = await runDistribute(current(w), { reweight: !!b.reweight }, { run, evidence }); } catch (e) { throw new ApiError(400, (e as Error).message); }
-          return send(res, 200, commit(out));
+          let release: () => void;
+          try { release = acquireWeekLock(w); } catch (e) { throw busy(e); }
+          try {
+            const before = current(w);
+            let out: Draft;
+            try { out = await runDistribute(before, { reweight: !!b.reweight }, { run, evidence }); } catch (e) { throw new ApiError(400, (e as Error).message); }
+            const latest = current(w);
+            if (latest.rev !== before.rev) throw new ApiError(409, 'The draft changed while weights were computed. Run Distribute again.', { draft: latest });
+            return send(res, 200, commit(out));
+          } finally { release(); }
         }
         case 'POST /api/hours': { const b = await readBody(req); return send(res, 200, wrap(() => { assertNotPushing(resolveWeek(b.week, now())); return commit(setHours(current(resolveWeek(b.week, now())), b.id, Number(b.hours))); })); }
         case 'POST /api/items': { const b = await readBody(req); return send(res, 200, wrap(() => { assertNotPushing(resolveWeek(b.week, now())); return commit(addManualItem(current(resolveWeek(b.week, now())), b)); })); }

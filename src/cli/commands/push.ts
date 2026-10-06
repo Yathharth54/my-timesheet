@@ -7,6 +7,7 @@ import { secretStore } from '../../lib/keychain.js';
 import { Linear } from '../../lib/linear.js';
 import { Everhour } from '../../lib/everhour.js';
 import { push, type PushEvent } from '../../lib/push.js';
+import { withWeekLock } from '../../lib/lock.js';
 import { fail, ok, step, weekSummary } from '../out.js';
 
 export function clientsFromSecrets() {
@@ -22,6 +23,10 @@ const LABEL: Record<PushEvent['phase'], string> = { parents: 'Linear parents', i
 export async function pushCmd(weekArg?: string): Promise<void> {
   const config = requireConfig();
   const week = resolveWeek(weekArg);
+  return withWeekLock(week, () => pushLocked(config, week));
+}
+
+async function pushLocked(config: ReturnType<typeof requireConfig>, week: string): Promise<void> {
   const draft = loadDraft(week);
   if (!draft) throw new Error(`No draft for ${week}. Run /timesheet in Claude first.`);
   const { linear, everhour } = clientsFromSecrets();

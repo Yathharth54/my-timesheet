@@ -6,6 +6,7 @@ import { saveConfig, saveDraft, readJsonl, loadDraft } from '../src/lib/store.js
 import { syncParents } from '../src/lib/parents.js';
 import { paths } from '../src/lib/paths.js';
 import { startServer } from '../src/server/server.js';
+import { acquireWeekLock } from '../src/lib/lock.js';
 
 const W = '2026-W41';
 let srv: Awaited<ReturnType<typeof startServer>>;
@@ -121,6 +122,32 @@ describe('review server', () => {
     expect(r.json).toMatchObject({ needsConfirm: true, hours: null });
   });
 
+  it('refuses to start a push while the week is locked', async () => {
+    const release = acquireWeekLock(W);
+    try {
+      const r = await api('POST', '/api/push', { week: W, confirm: true });
+      expect(r.status).toBe(423);
+      expect((await api('GET', `/api/push?week=${W}`)).json.status).toBe('idle');
+    } finally { release(); }
+  });
+
+  it('returns 409 when the draft changes while weights are computed', async () => {
+    const racing = await startServer(0, {
+      run: async () => { saveDraft(loadDraft(W)!); return '[{"id":"a","weight":3,"reason":"x"},{"id":"b","weight":1,"reason":"y"}]'; },
+      clients: () => ({ linear: new FakeLinear(), everhour }),
+      now: () => new Date('2026-10-06T10:00:00Z'),
+    });
+    try {
+      const d = loadDraft(W)!; d.totalHours = 4; saveDraft(d);
+      const r = await fetch(racing.url + '/api/distribute', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ week: W, reweight: true }) });
+      const j = await r.json();
+      expect(r.status).toBe(409);
+      expect(j.error).toBe('The draft changed while weights were computed. Run Distribute again.');
+      expect(j.draft.rev).toBe(loadDraft(W)!.rev);
+      expect(loadDraft(W)!.items.every(i => i.hours == null)).toBe(true);
+    } finally { await racing.close(); }
+  });
+
   const raw = (method: string, p: string, headers: Record<string, string>, body?: string) =>
     fetch(srv.url + p, { method, headers, body }).then(async r => ({ status: r.status, json: await r.json() }));
 
@@ -175,6 +202,10 @@ describe('review server', () => {
       expect((await g('PUT', '/api/draft', { draft: s.draft })).status).toBe(423);
       expect((await g('POST', '/api/hours', { week: W, id: 'a', hours: 1 })).status).toBe(423);
       expect((await g('POST', '/api/delete', { week: W, id: 'a' })).status).toBe(423);
+      // another server process sees only the week lock
+      const other = await api('POST', '/api/distribute', { week: W, reweight: false });
+      expect(other.status).toBe(423);
+      expect(other.json.error).toMatch(/is busy/);
     } finally {
       release();
       for (let i = 0; i < 100 && (await g('GET', `/api/push?week=${W}`)).json.status === 'running'; i++) await new Promise(r => setTimeout(r, 20));
