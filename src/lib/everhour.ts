@@ -21,7 +21,7 @@ export class Everhour {
   }
 
   async taskExists(issueUuid: string): Promise<boolean> {
-    return (await this.req('GET', `/tasks/li:${issueUuid}`)).status === 200;
+    return (await this.req('GET', `/tasks/li:${issueUuid}`)).status !== 404;
   }
 
   /** Verified 2026-10-06: returns 200 but does not import new issues. Called anyway, best effort. */
@@ -31,7 +31,10 @@ export class Everhour {
 
   /** POST /time upserts one record per (user, date, task), so repeating it is safe. */
   async addTime(a: { issueUuid: string; userId: number; date: string; hours: number }): Promise<void> {
-    await this.req('POST', '/time', { task: `li:${a.issueUuid}`, user: a.userId, date: a.date, time: Math.round(a.hours * 3600) });
+    const { status } = await this.req('POST', '/time', { task: `li:${a.issueUuid}`, user: a.userId, date: a.date, time: Math.round(a.hours * 3600) });
+    if (status < 200 || status >= 300) {
+      throw new Error(`Everhour: POST /time returned ${status} for li:${a.issueUuid}`);
+    }
   }
 
   async userSeconds(userId: number, from: string, to: string): Promise<number> {

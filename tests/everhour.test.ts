@@ -13,7 +13,7 @@ function fake(routes: Record<string, { status: number; body?: unknown }>) {
 
 describe('Everhour', () => {
   it('checks tasks by li:{uuid} and upserts time via POST /time', async () => {
-    const f = fake({ 'GET /tasks/li:abc': { status: 200, body: { id: 'li:abc' } }, 'POST /time': { status: 201, body: {} } });
+    const f = fake({ 'GET /tasks/li:abc': { status: 200, body: { id: 'li:abc' } }, 'GET /tasks/li:missing': { status: 404 }, 'POST /time': { status: 201, body: {} } });
     const e = new Everhour('key', { fetchImpl: f.fetchImpl });
     expect(await e.taskExists('abc')).toBe(true);
     expect(await e.taskExists('missing')).toBe(false);
@@ -36,5 +36,17 @@ describe('Everhour', () => {
   it('syncProject never throws', async () => {
     const f = fake({ 'POST /projects/li:p/sync': { status: 400, body: { message: 'bad' } } });
     await expect(new Everhour('k', { fetchImpl: f.fetchImpl }).syncProject('p')).resolves.toBeUndefined();
+  });
+
+  it('addTime rejects when POST /time returns 404', async () => {
+    const f = fake({ 'POST /time': { status: 404 } });
+    const e = new Everhour('k', { fetchImpl: f.fetchImpl });
+    await expect(e.addTime({ issueUuid: 'xyz', userId: 1, date: '2026-10-06', hours: 1 })).rejects.toThrow('POST /time returned 404 for li:xyz');
+  });
+
+  it('taskExists rejects on authentication error', async () => {
+    const f = fake({ 'GET /tasks/li:x': { status: 401 } });
+    const e = new Everhour('k', { fetchImpl: f.fetchImpl });
+    await expect(e.taskExists('x')).rejects.toThrow();
   });
 });
