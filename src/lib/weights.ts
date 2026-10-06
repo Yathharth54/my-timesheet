@@ -31,6 +31,8 @@ export const runClaude: ClaudeRunner = prompt =>
       if (code === 0) resolve(out);
       else reject(new Error(`claude -p exited ${code}: ${err.slice(0, 300)}`));
     });
+    // A dead pipe (claude missing / exited early) emits EPIPE on stdin; 'error'/'close' already reject.
+    child.stdin.on('error', () => {});
     child.stdin.end(prompt);
   });
 
@@ -92,7 +94,7 @@ export async function claudeSplits(
   for (const e of extractJsonArray(await run(splitsPrompt(items))) as any[]) {
     const want = items.find(i => i.id === e?.id);
     if (!want || !Array.isArray(e.parts) || e.parts.length !== want.parts) continue;
-    if (!e.parts.every((p: any) => typeof p?.title === 'string' && typeof p?.description === 'string')) continue;
+    if (!e.parts.every((p: any) => typeof p?.title === 'string' && p.title.trim() !== '' && typeof p?.description === 'string')) continue;
     out.set(want.id, e.parts.map((p: any) => ({ title: p.title, description: p.description })));
   }
   return out;

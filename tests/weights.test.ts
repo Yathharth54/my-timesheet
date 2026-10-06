@@ -62,4 +62,31 @@ describe('weights', () => {
     expect(seen!.opts.cwd).toBe((await import('node:os')).tmpdir());
     setSpawnForTests(null);
   });
+
+  it('runClaude rejects (no uncaught EPIPE) when claude is missing', async () => {
+    const { EventEmitter } = await import('node:events');
+    const { PassThrough } = await import('node:stream');
+    setSpawnForTests(((..._a: any[]) => {
+      const child: any = new EventEmitter();
+      child.stdout = new PassThrough(); child.stderr = new PassThrough(); child.stdin = new PassThrough();
+      child.kill = () => true;
+      setImmediate(() => {
+        child.stdin.emit('error', Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }));
+        child.emit('error', Object.assign(new Error('spawn claude ENOENT'), { code: 'ENOENT' }));
+      });
+      return child;
+    }) as any);
+    try { await expect(runClaude('hi')).rejects.toThrow(/ENOENT/); } finally { setSpawnForTests(null); }
+  });
+
+  it('runDistribute falls back to mechanical split when Claude returns blank part titles', async () => {
+    const d = makeDraft({ totalHours: 8, items: [makeItem({ id: 'big', weight: 5, title: 'Harness' })] });
+    const run = async (prompt: string) => prompt.includes('must become')
+      ? '[{"id":"big","parts":[{"title":"  ","description":"x"},{"title":"b","description":"y"},{"title":"c","description":"z"}]}]'
+      : '[]';
+    const out = await runDistribute(d, { reweight: false }, { run, evidence: ev });
+    expect(out.items.length).toBeGreaterThan(1);
+    expect(out.items.every(i => i.title.trim() !== '' && i.hours! <= 3)).toBe(true);
+    expect(out.items.some(i => i.title === 'b')).toBe(false);
+  });
 });
