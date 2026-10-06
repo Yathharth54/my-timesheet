@@ -200,10 +200,11 @@ export function createServer(deps: ServerDeps = {}): http.Server {
         }
         case 'POST /api/merge': { const b = await readBody(req); return send(res, 200, wrap(() => { assertNotPushing(resolveWeek(b.week, now())); return commit(mergeItems(current(resolveWeek(b.week, now())), b.ids)); })); }
         case 'GET /api/everhour': return send(res, 200, { hours: await everhourHours(week) });
-        case 'GET /api/history': return send(res, 200, listWeeks().map(w => {
-          const d = loadDraft(w)!;
+        case 'GET /api/history': return send(res, 200, listWeeks().flatMap(w => {
+          const d = loadDraft(w);
+          if (!d) return [];
           const live = d.items.filter(i => !i.deleted);
-          return { week: w, total: live.reduce((s, i) => s + (i.hours ?? 0), 0), items: live.length, pushed: d.pushed };
+          return [{ week: w, total: live.reduce((s, i) => s + (i.hours ?? 0), 0), items: live.length, pushed: d.pushed }];
         }));
         case 'GET /api/settings': {
           const c = requireConfig();

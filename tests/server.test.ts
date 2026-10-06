@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import http from 'node:http';
 import { tmpHome, testConfig, makeItem, makeDraft } from './helpers.js';
 import { FakeLinear, FakeEverhour } from './fakes.js';
-import { saveConfig, saveDraft, readJsonl, loadDraft } from '../src/lib/store.js';
+import { saveConfig, saveDraft, readJsonl, loadDraft, writeJsonAtomic } from '../src/lib/store.js';
 import { syncParents } from '../src/lib/parents.js';
 import { paths } from '../src/lib/paths.js';
 import { startServer } from '../src/server/server.js';
@@ -146,6 +146,13 @@ describe('review server', () => {
       expect(j.draft.rev).toBe(loadDraft(W)!.rev);
       expect(loadDraft(W)!.items.every(i => i.hours == null)).toBe(true);
     } finally { await racing.close(); }
+  });
+
+  it('history skips weeks that have no draft yet', async () => {
+    writeJsonAtomic(paths.evidence('2026-W42'), { commits: {}, sessions: {} });
+    const r = await api('GET', '/api/history');
+    expect(r.status).toBe(200);
+    expect(r.json.map((w: { week: string }) => w.week)).toEqual([W]);
   });
 
   const raw = (method: string, p: string, headers: Record<string, string>, body?: string) =>

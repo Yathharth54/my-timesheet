@@ -191,8 +191,7 @@ function renderPush() {
 function render() {
   renderHeader();
   if (state.tab === 'week') renderWeek();
-  else if (state.tab === 'settings') renderSettings();
-  else renderHistory();
+  else (state.tab === 'settings' ? renderSettings() : renderHistory()).catch(e => flash(e.message));
   renderStatus();
   renderPush();
 }
@@ -223,7 +222,7 @@ async function startPush(confirm) {
     if (state.push.status === 'running') setTimeout(poll, 400);
     else await load(state.week);
   };
-  poll();
+  poll().catch(e => flash(e.message));
 }
 
 function edit(id) { state.editing = id; renderWeek(); }
@@ -296,7 +295,7 @@ $('#paletteinput').addEventListener('keydown', e => {
   if (cmd === 'distribute') act('/api/distribute', { reweight: false });
   else if (cmd === 'reweight') act('/api/distribute', { reweight: true });
   else if (cmd === 'push') requestPush();
-  else if (cmd === 'week' && arg) load(arg);
+  else if (cmd === 'week' && arg) load(arg).catch(e => flash(e.message));
   else if (cmd === 'settings' || cmd === 'history' || cmd === 'week') { state.tab = cmd === 'week' ? 'week' : cmd; render(); }
 });
 
@@ -308,10 +307,10 @@ document.addEventListener('click', e => {
   if (t.dataset.day) { const d = state.draft.days; state.draft.days = d.includes(t.dataset.day) ? d.filter(x => x !== t.dataset.day) : [...d, t.dataset.day].sort(); renderWeek(); renderHeader(); return scheduleSave(); }
   if (t.id === 'distribute') return act('/api/distribute', { reweight: false });
   if (t.id === 'reweight') return act('/api/distribute', { reweight: true });
-  if (t.id === 'prev' || t.id === 'next') { const [y, w] = state.week.split('-W').map(Number); const d = new Date(Date.UTC(y, 0, 4 + (w - 1) * 7 + (t.id === 'next' ? 7 : -7))); return load(isoWeek(d)); }
+  if (t.id === 'prev' || t.id === 'next') { const [y, w] = state.week.split('-W').map(Number); const d = new Date(Date.UTC(y, 0, 4 + (w - 1) * 7 + (t.id === 'next' ? 7 : -7))); return load(isoWeek(d)).catch(e => flash(e.message)); }
   if (t.classList.contains('item')) { state.focus = itemRows().findIndex(r => r.item.id === t.dataset.id); renderWeek(); renderStatus(); }
   if (t.classList.contains('add')) addItem();
-  if (t.classList.contains('hist')) { state.tab = 'week'; load(t.dataset.week); }
+  if (t.classList.contains('hist')) { state.tab = 'week'; load(t.dataset.week).catch(e => flash(e.message)); }
 });
 
 function isoWeek(d) {
