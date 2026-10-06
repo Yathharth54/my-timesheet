@@ -52,7 +52,11 @@ export function nearestDay(day: string, days: string[]): string {
   return [...days].sort((a, b) => dayDistance(day, a) - dayDistance(day, b) || a.localeCompare(b))[0];
 }
 
-/** Greedy: move items from the heaviest to the lightest day until every day is within ±1h of the average. */
+/**
+ * Greedy: move items off the heaviest day to the nearest under-average day until every day is within ±1h of the
+ * average. Pushed items never move. Locked and hand-added items stay on their day (and still count toward its
+ * load); they only move when their day isn't counted, so they land somewhere counted.
+ */
 export function balanceDays(draft: Draft): void {
   const days = [...draft.days].sort();
   if (days.length === 0) return;
@@ -61,18 +65,27 @@ export function balanceDays(draft: Draft): void {
   const load = new Map(days.map(d => [d, 0]));
   for (const i of items) if (load.has(i.day)) load.set(i.day, load.get(i.day)! + (i.hours ?? 0));
   const avg = [...load.values()].reduce((a, b) => a + b, 0) / days.length;
+  const movable = (i: Item) => !i.linear && !i.locked && !i.evidence.manual && (i.hours ?? 0) > 0;
   for (let guard = 0; guard < 1000; guard++) {
     const sorted = [...load].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
     const [hi, hiLoad] = sorted[0];
-    const [lo, loLoad] = sorted[sorted.length - 1];
+    const loLoad = sorted[sorted.length - 1][1];
     if (hiLoad - avg <= 1 + EPS && avg - loLoad <= 1 + EPS) break;
-    const spread = hiLoad - loLoad;
-    const candidates = items.filter(i => i.day === hi && !i.linear && (i.hours ?? 0) > 0 && (i.hours ?? 0) < spread - EPS);
-    if (!candidates.length) break;
-    candidates.sort((a, b) => Math.abs(spread - 2 * a.hours!) - Math.abs(spread - 2 * b.hours!) || a.id.localeCompare(b.id));
-    const pick = candidates[0];
-    pick.day = lo;
-    load.set(hi, hiLoad - pick.hours!);
-    load.set(lo, loLoad + pick.hours!);
+    const targets = [...load].filter(([d, l]) => d !== hi && l < avg - EPS)
+      .sort((a, b) => dayDistance(hi, a[0]) - dayDistance(hi, b[0]) || a[1] - b[1] || a[0].localeCompare(b[0]));
+    let moved = false;
+    for (const [lo, toLoad] of targets) {
+      const spread = hiLoad - toLoad;
+      const candidates = items.filter(i => i.day === hi && movable(i) && i.hours! < spread - EPS);
+      if (!candidates.length) continue;
+      candidates.sort((a, b) => Math.abs(spread - 2 * a.hours!) - Math.abs(spread - 2 * b.hours!) || a.id.localeCompare(b.id));
+      const pick = candidates[0];
+      pick.day = lo;
+      load.set(hi, hiLoad - pick.hours!);
+      load.set(lo, toLoad + pick.hours!);
+      moved = true;
+      break;
+    }
+    if (!moved) break;
   }
 }

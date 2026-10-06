@@ -68,4 +68,34 @@ describe('balanceDays', () => {
     balanceDays(d);
     expect(d.items[0].day).toBe('2026-10-05');
   });
+
+  it('keeps locked and hand-added items on their day, but still counts them', () => {
+    const manual = { commits: [], sessions: [], manual: true };
+    const d = makeDraft({ items: [
+      makeItem({ id: 'locked', day: '2026-10-05', hours: 3, locked: true }),
+      makeItem({ id: 'hand', day: '2026-10-05', hours: 3, evidence: manual }),
+      makeItem({ id: 'free', day: '2026-10-05', hours: 1 }),
+      makeItem({ id: 'sat', day: '2026-10-10', hours: 1, evidence: manual }),
+    ] });
+    balanceDays(d);
+    const day = (id: string) => d.items.find(i => i.id === id)!.day;
+    expect(day('locked')).toBe('2026-10-05');
+    expect(day('hand')).toBe('2026-10-05');
+    expect(day('free')).not.toBe('2026-10-05');
+    expect(day('sat')).toBe('2026-10-09');
+  });
+
+  it('moves work to the nearest under-average day, not the globally lightest', () => {
+    const d = makeDraft({ items: [
+      makeItem({ id: 'one', day: '2026-10-05', hours: 1.5 }),
+      makeItem({ id: 'two', day: '2026-10-05', hours: 2 }),
+      makeItem({ id: 'three', day: '2026-10-05', hours: 3.5 }),
+      makeItem({ id: 'tue', day: '2026-10-06', hours: 2.5 }),
+      makeItem({ id: 'wed', day: '2026-10-07', hours: 5 }),
+      makeItem({ id: 'thu', day: '2026-10-08', hours: 5 }),
+      makeItem({ id: 'fri', day: '2026-10-09', hours: 0.5 }),
+    ] });
+    balanceDays(d);
+    expect(d.items.find(i => i.id === 'two')!.day).toBe('2026-10-06');
+  });
 });
