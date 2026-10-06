@@ -1,13 +1,47 @@
+// The review UI: a green desk with the week printed as a receipt. Everything comes from the local server.
+
+// ---------- helpers ----------
 const $ = (s, el = document) => el.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const linearLink = l => /^https?:\/\//i.test(l?.url ?? '') ? `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.identifier)}</a>` : esc(l?.identifier);
-const WEEKDAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-const dayName = d => WEEKDAY[new Date(`${d}T12:00:00`).getDay()];
+const DAYN = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const dname = d => DAYN[new Date(`${d}T12:00:00`).getDay()];
+const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const pretty = d => { const x = new Date(`${d}T12:00:00`); return `${MON[x.getMonth()]} ${x.getDate()}`; };
+const fmt = h => (h == null ? '—' : Number(h).toFixed(1));
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const CHEV = '<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m2.5 4.5 3.5 3.5 3.5-3.5"/></svg>';
+const PREV = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M10 3 5 8l5 5"/></svg>';
+const NEXT = '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m6 3 5 5-5 5"/></svg>';
+const TEXT_TAGS = ['INPUT', 'TEXTAREA', 'SELECT'];
 
+function weekDays(week) {
+  const [y, w] = week.split('-W').map(Number);
+  const j4 = new Date(Date.UTC(y, 0, 4));
+  const mon = new Date(j4);
+  mon.setUTCDate(j4.getUTCDate() - ((j4.getUTCDay() + 6) % 7) + (w - 1) * 7);
+  return Array.from({ length: 7 }, (_, i) => { const d = new Date(mon); d.setUTCDate(mon.getUTCDate() + i); return d.toISOString().slice(0, 10); });
+}
+function isoWeek(d) {
+  const t = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  const dow = (t.getUTCDay() + 6) % 7; t.setUTCDate(t.getUTCDate() - dow + 3);
+  const y = t.getUTCFullYear(); const j4 = new Date(Date.UTC(y, 0, 4));
+  return `${y}-W${String(1 + Math.round(((t - j4) / 86400000 - 3 + ((j4.getUTCDay() + 6) % 7)) / 7)).padStart(2, '0')}`;
+}
+const shiftWeek = (week, n) => { const [y, w] = week.split('-W').map(Number); return isoWeek(new Date(Date.UTC(y, 0, 4 + (w - 1) * 7 + n * 7))); };
+const weekNo = week => Number(week.split('-W')[1]);
+
+// ---------- state ----------
 const state = {
   week: new URLSearchParams(location.search).get('week'),
   draft: null, base: null, weeks: [], projects: [], warnings: [], push: { status: 'idle' },
-  tab: 'week', focus: 0, editing: null, confirm: null, mergeFrom: null, armedDelete: null, everhour: null, saving: false, flash: '',
+  tab: 'week', sel: null, mergeFrom: null, armedDelete: null, collapsed: new Set(), flash: new Set(), fed: false,
+  adding: false, addProject: null, addDay: null,
+  everhour: undefined, // undefined: still asking, null: couldn't read, number: hours
+  saving: false, busy: null, toast: '', help: false, palette: false,
+  openSel: null, selActive: 0,
+  print: null, settings: null, settingsSaving: false, history: null, loadError: null,
 };
 
 async function api(method, url, body) {
@@ -17,331 +51,890 @@ async function api(method, url, body) {
   return j;
 }
 
-function flash(msg) { state.flash = msg; renderStatus(); setTimeout(() => { if (state.flash === msg) { state.flash = ''; renderStatus(); } }, 4000); }
+let toastTimer = null;
+function toast(msg) {
+  state.toast = msg; renderToast();
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { state.toast = ''; renderToast(); }, 4000);
+}
 
-function accept(res) {
-  state.draft = res.draft;
+// ---------- draft data ----------
+const live = () => state.draft.items.filter(i => !i.deleted);
+const findItem = id => state.draft?.items.find(i => i.id === id && !i.deleted);
+const projectNames = () => state.projects.map(p => p.name);
+const kindOf = name => state.projects.find(p => p.name === name)?.kind;
+const isPushed = i => !!i.linear?.created; // read-only everywhere
+const isFrozen = i => !!i.linear; // the server refuses hours, split, merge and delete once a Linear id exists
+const color = p => { const k = projectNames().indexOf(p); return k < 0 ? 'var(--bad-ink)' : `var(--p${(k % 6) + 1})`; };
+const parentTitle = (day, project) => state.draft.parents.find(p => p.key === `${day}|${project}`)?.title || `${dname(day)} — ${project}`;
+const unlogged = () => live().filter(i => !i.everhour?.logged);
+const blocks = () => state.warnings.filter(w => w.level === 'block');
+
+function groupedDays() {
+  const act = live();
+  const counted = state.draft.days;
+  const order = [...projectNames()];
+  const rank = k => (k === '' ? 1e6 : order.includes(k) ? order.indexOf(k) : 1e5);
+  const days = [...new Set([...counted, ...act.map(i => i.day)])].sort();
+  return days.map(day => {
+    const its = act.filter(i => i.day === day);
+    const keys = [...new Set(its.map(i => i.project ?? ''))].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+    return { day, counted: counted.includes(day), total: its.reduce((s, i) => s + (i.hours ?? 0), 0), count: its.length, groups: keys.map(k => ({ key: k, items: its.filter(i => (i.project ?? '') === k) })) };
+  }).filter(d => d.counted || d.count);
+}
+const visibleLines = () => groupedDays().filter(d => !state.collapsed.has(d.day)).flatMap(d => d.groups.flatMap(g => g.items));
+
+// ---------- loading and saving ----------
+function accept(res, draft = res.draft) {
+  const before = new Map((state.draft?.week === res.draft.week ? state.draft.items : []).map(i => [i.id, i.hours]));
+  state.draft = draft;
   state.base = structuredClone(res.draft);
   state.warnings = res.warnings;
+  const changed = res.draft.items.filter(i => before.has(i.id) && before.get(i.id) !== i.hours).map(i => i.id);
+  if (changed.length) { state.flash = new Set(changed); setTimeout(() => { state.flash = new Set(); }, 1100); }
+  if (!findItem(state.sel)) state.sel = live().find(i => !isPushed(i))?.id ?? live()[0]?.id ?? null;
   render();
 }
 
 async function load(week) {
   const s = await api('GET', `/api/state${week ? `?week=${week}` : ''}`);
-  state.week = s.week; state.weeks = s.weeks; state.projects = s.projects; state.push = s.push;
+  const fresh = !state.draft || s.week !== state.week;
+  if (s.week !== state.week) {
+    state.sel = null; state.mergeFrom = null; state.armedDelete = null; state.adding = false; state.collapsed = new Set(); state.fed = false;
+    if (state.print && state.print.week !== s.week) state.print = null;
+  }
+  state.week = s.week; state.weeks = s.weeks; state.projects = s.projects; state.push = s.push; state.loadError = null;
   history.replaceState(null, '', `?week=${s.week}`);
+  if (fresh && !state.print && (s.push.status === 'running' || s.push.status === 'awaiting_sync')) state.print = newPrint(s.draft, 'server');
   accept(s);
-  api('GET', `/api/everhour?week=${s.week}`).then(r => { state.everhour = r.hours; renderHeader(); }).catch(() => {});
+  if (s.push.status === 'running') pollPush();
+  loadEverhour(s.week);
+}
+
+function loadEverhour(week) {
+  state.everhour = undefined;
+  api('GET', `/api/everhour?week=${week}`)
+    .then(r => { if (state.week === week) { state.everhour = r.hours; render(); } })
+    .catch(() => { if (state.week === week) { state.everhour = null; render(); } });
 }
 
 const FIELDS = ['title', 'description', 'project', 'day', 'locked'];
-function pendingPatches() {
-  const base = new Map(state.base.items.map(i => [i.id, i]));
+/** Field edits in `draft` that `base` doesn't have yet. */
+function diffEdits(draft, base) {
+  const byId = new Map(base.items.map(i => [i.id, i]));
   const out = [];
-  for (const i of state.draft.items) {
-    const b = base.get(i.id);
+  for (const i of draft.items) {
+    const b = byId.get(i.id);
     if (!b) continue;
     const patch = {};
     for (const f of FIELDS) if (JSON.stringify(i[f]) !== JSON.stringify(b[f])) patch[f] = i[f];
     if (Object.keys(patch).length) out.push([i.id, patch]);
   }
   const top = {};
-  if (state.draft.totalHours !== state.base.totalHours) top.totalHours = state.draft.totalHours;
-  if (JSON.stringify(state.draft.days) !== JSON.stringify(state.base.days)) top.days = state.draft.days;
+  if (draft.totalHours !== base.totalHours) top.totalHours = draft.totalHours;
+  if (JSON.stringify(draft.days) !== JSON.stringify(base.days)) top.days = draft.days;
   return { items: out, top };
 }
+const pendingPatches = () => diffEdits(state.draft, state.base);
+
+/** Copies field edits onto a draft (never onto pushed items). */
+function applyEdits(target, edits) {
+  for (const [id, patch] of edits.items) { const it = target.items.find(x => x.id === id); if (it && !it.linear?.created) Object.assign(it, patch); }
+  Object.assign(target, edits.top);
+  return target;
+}
+
+/** Accepts a server response without losing edits typed while the request was in flight (`sent` is what we had when it left). */
+function acceptCarrying(res, sent) {
+  const late = diffEdits(state.draft, sent);
+  if (!late.items.length && !Object.keys(late.top).length) return accept(res);
+  accept(res, applyEdits(structuredClone(res.draft), late));
+  scheduleSave();
+}
+const hasPending = () => { if (!state.draft) return false; const p = pendingPatches(); return p.items.length > 0 || Object.keys(p.top).length > 0; };
 
 let saveTimer = null;
-function scheduleSave() { clearTimeout(saveTimer); saveTimer = setTimeout(save, 400); renderStatus(); }
+function scheduleSave() { clearTimeout(saveTimer); saveTimer = setTimeout(save, 400); renderTop(); }
 
 async function save() {
+  clearTimeout(saveTimer);
   const pending = pendingPatches();
   if (!pending.items.length && !Object.keys(pending.top).length) return;
-  state.saving = true; renderStatus();
+  state.saving = true; renderTop();
   try {
+    let sent = structuredClone(state.draft);
     try {
-      accept(await api('PUT', '/api/draft', { draft: state.draft }));
+      acceptCarrying(await api('PUT', '/api/draft', { draft: sent }), sent);
     } catch (e) {
       const server = e.body?.draft;
       if (e.status !== 409 || !server) throw e;
-      const fresh = structuredClone(server);
-      for (const [id, patch] of pending.items) { const it = fresh.items.find(x => x.id === id); if (it && !it.linear?.created) Object.assign(it, patch); }
-      Object.assign(fresh, pending.top);
+      const fresh = applyEdits(structuredClone(server), diffEdits(state.draft, state.base)); // includes anything typed meanwhile
       state.base = structuredClone(server);
       state.draft = fresh;
-      flash('draft changed elsewhere, your edits were re-applied');
-      accept(await api('PUT', '/api/draft', { draft: state.draft })); // one retry only; state.saving stays true
+      toast('The draft changed elsewhere. Your edits were re-applied.');
+      sent = structuredClone(fresh);
+      acceptCarrying(await api('PUT', '/api/draft', { draft: sent }), sent); // one retry only; state.saving stays true
     }
   } catch (e) {
-    flash(e.message);
-  } finally { state.saving = false; renderStatus(); }
+    toast(e.message); // a 423 (push running) just shows its message
+  } finally { state.saving = false; renderTop(); }
 }
 
+/** POSTs an edit for this week. Returns the new draft on success, null on failure. */
 async function act(url, body) {
   await save();
-  try { accept(await api('POST', url, { week: state.week, ...body })); } catch (e) {
+  const sent = structuredClone(state.draft);
+  try {
+    const res = await api('POST', url, { week: state.week, ...body });
+    acceptCarrying(res, sent);
+    return res.draft;
+  } catch (e) {
     if (e.status === 409) await load(state.week).catch(() => {});
-    flash(e.message);
+    toast(e.message);
+    return null;
   }
 }
 
-const live = () => state.draft.items.filter(i => !i.deleted);
-function rows() {
-  const out = [];
-  for (const day of [...state.draft.days].sort()) {
-    out.push({ kind: 'day', day });
-    const its = live().filter(i => i.day === day);
-    for (const project of [...new Set(its.map(i => i.project ?? ''))]) {
-      const parent = state.draft.parents.find(p => p.key === `${day}|${project}`);
-      out.push({ kind: 'parent', day, project, parent });
-      for (const item of its.filter(i => (i.project ?? '') === project)) out.push({ kind: 'item', item });
+/** Changes a field that travels through PUT /api/draft. Text fields skip the re-render: the input already shows the value. */
+function setField(it, field, value, rerender = true) {
+  if (!it || isPushed(it)) return;
+  it[field] = value;
+  scheduleSave();
+  if (rerender) render();
+}
+
+// ---------- line actions ----------
+async function distribute(reweight) {
+  if (state.busy) return;
+  state.busy = reweight ? 'reweight' : 'itemise'; render();
+  const d = await act('/api/distribute', { reweight });
+  state.busy = null; render();
+  if (d) toast(reweight ? 'Effort re-estimated and hours itemised.' : 'Hours itemised.');
+}
+function stepHours(it, delta, floorFrom) {
+  if (!it || isFrozen(it)) return;
+  return act('/api/hours', { id: it.id, hours: Math.max(0.5, (it.hours ?? floorFrom) + delta) });
+}
+async function splitLine(it) {
+  if (!it || isFrozen(it)) return;
+  if (await act('/api/split', { id: it.id, parts: 2 })) { state.sel = `${it.id}-1`; render(); toast('Split in two. Press Itemise to give them hours.'); }
+}
+async function mergeInto(firstId, otherId) {
+  state.mergeFrom = null;
+  if (await act('/api/merge', { ids: [firstId, otherId] })) { state.sel = firstId; render(); toast('Merged.'); }
+}
+async function deleteLine(it) {
+  if (!it || isFrozen(it)) return;
+  if (state.armedDelete !== it.id) { state.armedDelete = it.id; render(); toast('Press again to delete.'); return; }
+  state.armedDelete = null;
+  if (await act('/api/delete', { id: it.id })) toast('Line deleted.');
+}
+function toggleMark(it) {
+  if (!it || isFrozen(it)) return;
+  if (state.mergeFrom && state.mergeFrom !== it.id) return mergeInto(state.mergeFrom, it.id);
+  state.mergeFrom = it.id; render(); toast('Marked. Press m on another line to merge.');
+}
+function selectLine(id, scroll = true) {
+  const line = findItem(id);
+  if (!line) return;
+  state.collapsed.delete(line.day);
+  state.sel = id; state.armedDelete = null;
+  render();
+  if (scroll) document.querySelector(`.r-line[data-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+function openAdd() {
+  if (state.tab !== 'week' || state.print) return;
+  state.adding = true; state.addProject = null; state.addDay = null; render();
+  $('#add-title')?.focus();
+}
+async function submitAdd() {
+  const title = $('#add-title').value.trim();
+  if (!title) return toast('Give the line a title.');
+  const days = state.draft.days.length ? state.draft.days : weekDays(state.week);
+  const before = new Set(state.draft.items.map(i => i.id));
+  const d = await act('/api/items', { title, description: $('#add-desc').value, project: state.addProject ?? projectNames()[0] ?? null, day: state.addDay ?? findItem(state.sel)?.day ?? days[0] });
+  if (!d) return;
+  state.adding = false;
+  state.sel = d.items.find(i => !before.has(i.id))?.id ?? state.sel;
+  render(); toast('Line added. Press Itemise to give it hours.');
+}
+
+// ---------- custom select ----------
+const SELS = {};
+function select(id, options, value, onPick, opt = {}) {
+  SELS[id] = { options, onPick };
+  const cur = options.find(o => o.v === value);
+  const open = state.openSel === id;
+  return `<div class="sel ${opt.paper ? 'on-paper' : ''}">
+    <button type="button" class="sel-btn" id="${id}" data-act="sel-toggle" data-sel="${id}" aria-haspopup="listbox" aria-expanded="${open}" ${opt.disabled ? 'disabled' : ''} ${opt.label ? `aria-label="${esc(opt.label)}"` : ''}>
+      ${cur?.color ? `<span class="swatch" style="background:${cur.color}"></span>` : ''}
+      <span class="lbl ${cur ? '' : 'ph'}">${esc(cur ? cur.label : (opt.placeholder || 'Choose'))}</span>${CHEV}
+    </button>
+    ${open ? `<ul class="sel-list" role="listbox" aria-labelledby="${id}">${options.map((o, k) => `<li class="sel-opt ${k === state.selActive ? 'active' : ''}" role="option" aria-selected="${o.v === value}" data-act="sel-pick" data-sel="${id}" data-k="${k}">${o.color ? `<span class="swatch" style="background:${o.color}"></span>` : ''}<span>${esc(o.label)}</span>${o.hint ? `<span class="hint">${esc(o.hint)}</span>` : ''}</li>`).join('')}</ul>` : ''}
+  </div>`;
+}
+const projectOptions = () => state.projects.map(p => ({ v: p.name, label: p.name, hint: p.kind, color: color(p.name) }));
+function pickSel(id, k) {
+  const s = SELS[id];
+  state.openSel = null;
+  if (!s) return render();
+  const o = s.options[k];
+  if (o) s.onPick(o.v);
+  render();
+  document.getElementById(id)?.focus();
+}
+
+// ---------- render ----------
+function render() {
+  const ae = document.activeElement;
+  const keep = ae && ae.id && ae !== document.body
+    ? { id: ae.id, owner: ae.dataset.for, text: TEXT_TAGS.includes(ae.tagName) ? ae.value : undefined, s: ae.selectionStart, e: ae.selectionEnd }
+    : null;
+  const scroll = [...document.querySelectorAll('[data-keep-scroll]')].map(el => [el.dataset.keepScroll, el.scrollTop]);
+  for (const k in SELS) delete SELS[k];
+  renderTop(); renderView(); renderOverlay(); renderToast();
+  for (const [k, top] of scroll) { const el = document.querySelector(`[data-keep-scroll="${k}"]`); if (el) el.scrollTop = top; }
+  if (keep) {
+    const el = document.getElementById(keep.id);
+    if (el && !el.disabled && el.dataset.for === keep.owner) {
+      if (keep.text !== undefined && el.value !== keep.text) el.value = keep.text; // keep what is being typed
+      el.focus({ preventScroll: true });
+      try { if (keep.s != null) el.setSelectionRange(keep.s, keep.e); } catch { /* not a text field */ }
     }
   }
-  const stray = live().filter(i => !state.draft.days.includes(i.day));
-  if (stray.length) { out.push({ kind: 'day', day: 'not counted' }); for (const item of stray) out.push({ kind: 'item', item }); }
-  return out;
-}
-const itemRows = () => rows().filter(r => r.kind === 'item');
-const focused = () => itemRows()[state.focus]?.item;
-
-function renderHeader() {
-  $('#weeklabel').textContent = state.week;
-  $('#total').value = state.draft.totalHours ?? '';
-  const all = (() => { const [y, w] = state.week.split('-W').map(Number); const j4 = new Date(Date.UTC(y, 0, 4)); const mon = new Date(j4); mon.setUTCDate(j4.getUTCDate() - ((j4.getUTCDay() + 6) % 7) + (w - 1) * 7); return Array.from({ length: 7 }, (_, i) => { const d = new Date(mon); d.setUTCDate(mon.getUTCDate() + i); return d.toISOString().slice(0, 10); }); })();
-  $('#days').innerHTML = all.map(d => `<button class="day ${state.draft.days.includes(d) ? 'on' : ''}" data-day="${esc(d)}">${dayName(d)[0]}</button>`).join('');
-  $('#everhour').textContent = state.everhour == null ? '' : `already in everhour: ${state.everhour.toFixed(1)}h`;
-  $('#warnings').innerHTML = state.warnings.map(w => `<div class="warn ${esc(w.level)}">${w.level === 'block' ? '✗' : '!'} ${esc(w.message)}</div>`).join('');
-  document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === state.tab));
+  if (state.openSel) document.querySelector(`#${state.openSel} + .sel-list .sel-opt.active`)?.scrollIntoView({ block: 'nearest' });
 }
 
-function renderWeek() {
-  const fid = focused()?.id;
-  const loadByDay = d => live().filter(i => i.day === d).reduce((s, i) => s + (i.hours ?? 0), 0);
-  $('#view').innerHTML = rows().map(r => {
-    if (r.kind === 'day') return `<div class="row day" data-dropday="${esc(r.day)}">▾ ${r.day === 'not counted' ? 'NOT COUNTED' : `${dayName(r.day).toUpperCase()} ${esc(r.day)}`}<span class="num">${r.day === 'not counted' ? '' : loadByDay(r.day).toFixed(1) + 'h'}</span></div>`;
-    if (r.kind === 'parent') return `<div class="row parent">├─ <span class="proj">${esc(r.project || 'unassigned')}</span> <span class="ptitle" data-parent="${esc(r.parent?.key ?? '')}">${esc(r.parent?.title ?? '')}</span>${r.parent?.linear?.created ? ` ${linearLink(r.parent.linear)}` : ''}</div>`;
-    const i = r.item;
-    const pushed = !!i.linear?.created;
-    const editing = state.editing === i.id;
-    const cls = ['row', 'item', i.id === fid ? 'focus' : '', pushed ? 'pushed' : '', state.mergeFrom === i.id ? 'marked' : ''].join(' ');
-    return `<div class="${cls}" data-id="${esc(i.id)}" draggable="${!pushed}">
-      <div class="line">│  ${i.id === fid ? '<span class="cursor">█</span>' : ' '} ${editing ? `<input class="edit-title" value="${esc(i.title)}">` : `<span class="title">${esc(i.title)}</span>`}
-        <span class="proj">[${esc(i.project ?? '—')}]</span>
-        <span class="num">${i.hours == null ? '  —' : i.hours.toFixed(1)}h</span>${i.locked ? '<span class="lock" title="locked">L</span>' : ''}
-        ${pushed ? linearLink(i.linear) : ''}</div>
-      ${editing ? `<textarea class="edit-desc" rows="3">${esc(i.description)}</textarea>` : `<div class="desc dim">${esc(i.description)}</div>`}
-      <div class="why dim">${esc(i.bucketReason)}${i.weightReason ? ` · weight ${esc(i.weight)}: ${esc(i.weightReason)}` : ''}${i.evidence.manual ? ' · added by hand' : ` · ${i.evidence.commits.length} commits, ${i.evidence.sessions.length} sessions`}</div>
-    </div>`;
-  }).join('') + `<div class="row add">+ add item <span class="dim">(a)</span></div>`;
-  if (state.editing) $('.edit-title')?.focus();
+function renderTop() {
+  const busy = state.saving || state.settingsSaving || hasPending();
+  const onWeek = state.tab === 'week' && !state.print;
+  $('#top').innerHTML = `<div class="top-in">
+    <span class="brand">my-timesheet</span>
+    <span class="spacer"></span>
+    <nav class="tabs" aria-label="Sections">${[['week', 'This week'], ['history', 'Past weeks'], ['settings', 'Settings']].map(([k, l]) => `<button class="tab ${state.tab === k && !state.print ? 'on' : ''}" data-act="tab" data-k="${k}">${l}</button>`).join('')}</nav>
+    ${onWeek && state.week ? `<div class="weeknav">
+      <button class="icon-btn" data-act="prev" aria-label="Previous week">${PREV}</button>
+      <span class="weeklabel" title="${esc(state.week)}">Week ${weekNo(state.week)}</span>
+      <button class="icon-btn" data-act="next" aria-label="Next week">${NEXT}</button>
+    </div>` : ''}
+    <span class="saved ${busy ? 'busy' : ''}" aria-live="polite">${busy ? 'Saving' : 'Saved'}</span>
+  </div>`;
+}
+function renderToast() { $('#toast').innerHTML = state.toast ? `<div class="toast" role="status">${esc(state.toast)}</div>` : ''; }
+
+const HELP = [['j / k', 'next / previous line'], ['e', 'edit the title'], ['p', 'next project'], ['[ / ]', 'half an hour less / more (locks the line)'], ['L', 'lock or unlock hours'], ['s', 'split in two'], ['m', 'mark, then m on another line to merge'], ['d d', 'delete the line'], ['a', 'add a line'], ['D', 'itemise hours'], ['P', 'print to Linear and Everhour'], ['/', 'command palette'], ['?', 'show or hide this']];
+function renderOverlay() {
+  const help = state.help ? `<div class="overlay" role="dialog" aria-label="Keyboard shortcuts"><strong>Keyboard</strong><dl>${HELP.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl></div>` : '';
+  const palette = state.palette ? `<div class="overlay palette" role="dialog" aria-label="Command palette"><input id="paletteinput" autocomplete="off" spellcheck="false" placeholder="itemise · reweight · print · week 2026-W40 · history · settings" aria-label="Command"><div class="faint">Enter runs it. Esc closes.</div></div>` : '';
+  $('#overlay').innerHTML = help + palette;
 }
 
-async function renderSettings() {
-  const s = await api('GET', '/api/settings');
-  $('#view').innerHTML = `
-    <h3>projects</h3>${s.projects.map(p => `<div class="row">${esc(p.name)} <select data-kind="${esc(p.name)}"><option ${p.kind === 'billable' ? 'selected' : ''}>billable</option><option ${p.kind === 'internal' ? 'selected' : ''}>internal</option></select></div>`).join('')}
-    <h3>repos</h3>${s.repos.map(r => `<div class="row"><span class="dim">${esc(r.name ?? r.root)}</span> <select data-repo="${esc(r.root)}">${['work', 'personal', 'ignore'].map(c => `<option ${r.class === c ? 'selected' : ''}>${c}</option>`).join('')}</select> <select data-repoproj="${esc(r.root)}"><option value="">—</option>${s.projects.filter(p => p.kind === 'billable').map(p => `<option ${r.project === p.name ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>`).join('')}
-    <h3>work orgs</h3><input id="orgs" value="${esc(s.workOrgs.join(', '))}">
-    <h3>sunday reminder</h3><label><input type="checkbox" id="nudge" ${s.nudge ? 'checked' : ''}> remind me</label>
-    <div><button id="savesettings" class="accent">save settings</button> <span class="dim">keys: run <code>timesheet init</code> to reconnect</span></div>`;
-  $('#savesettings').onclick = async () => {
-    await api('PUT', '/api/settings', {
-      projects: [...document.querySelectorAll('[data-kind]')].map(el => ({ name: el.dataset.kind, kind: el.value })),
-      repos: [...document.querySelectorAll('[data-repo]')].map(el => ({ root: el.dataset.repo, class: el.value, project: document.querySelector(`[data-repoproj="${CSS.escape(el.dataset.repo)}"]`).value || undefined })),
-      workOrgs: $('#orgs').value.split(',').map(s => s.trim()).filter(Boolean),
-      nudge: $('#nudge').checked,
-    });
-    flash('settings saved');
-  };
-}
-
-async function renderHistory() {
-  const h = await api('GET', '/api/history');
-  $('#view').innerHTML = h.map(w => `<div class="row hist" data-week="${esc(w.week)}">${esc(w.week)}<span class="num">${w.total.toFixed(1)}h</span> <span class="dim">${w.items} items · ${w.pushed ? 'pushed' : 'not pushed'}</span></div>`).join('') || '<div class="dim">no weeks yet</div>';
-}
-
-function renderStatus() {
+function renderView() {
+  if (state.loadError) { $('#view').innerHTML = `<div class="load-error">✗ ${esc(state.loadError)}</div>`; return; }
   if (!state.draft) return;
-  const t = live().reduce((s, i) => s + (i.hours ?? 0), 0);
-  const by = {};
-  for (const i of live()) by[i.project ?? 'unassigned'] = (by[i.project ?? 'unassigned'] ?? 0) + (i.hours ?? 0);
-  const blocks = state.warnings.filter(w => w.level === 'block').length;
-  const pend = pendingPatches();
-  const saved = state.saving ? '… saving' : (pend.items.length || Object.keys(pend.top).length ? '● unsaved' : '✓ saved');
-  $('#status').innerHTML = [state.week.replace(/^\d{4}-/, ''), `${t.toFixed(1)}h`, ...Object.entries(by).map(([p, h]) => `${esc(p.toLowerCase())} ${h.toFixed(1)}`), `${live().length} items`, state.draft.weightsSource ? `weights: ${state.draft.weightsSource}` : null, blocks ? `<span class="bad">${blocks} blocking</span>` : null, saved, state.flash ? `<span class="accent-text">${esc(state.flash)}</span>` : null].filter(Boolean).join(' · ') + `<span class="right">push ▸ P · help ?</span>`;
+  if (state.print) return renderPrint();
+  if (state.tab === 'history') return renderHistory();
+  if (state.tab === 'settings') return renderSettings();
+  renderWeek();
 }
 
-function renderPush() {
-  const p = state.push;
-  const el = $('#pushpanel');
-  if (state.confirm) { el.hidden = false; el.innerHTML = `? ${esc(state.confirm.text)} <span class="dim">(y/n)</span>`; return; }
-  if (!p || p.status === 'idle') { el.hidden = true; return; }
-  el.hidden = false;
-  const lines = {
-    running: `<span class="spin">⠋</span> ${esc(p.phase ?? '')} ${p.done ?? 0}/${p.total ?? 0}`,
-    awaiting_sync: `! ${p.missing.length} issues not in Everhour yet. Open Everhour → Projects → ${esc([...new Set(p.missing.map(m => m.project))].join(', '))} → Sync, then <button id="continue" class="accent">continue</button>`,
-    done: `✓ pushed · ${esc(state.week)}`,
-    blocked: `✗ blocked: ${esc(p.warnings.map(w => w.message).join('; '))}`,
-    error: `✗ ${esc(p.error)} <button id="continue">retry</button>`,
+// ---------- week ----------
+function renderWeek() {
+  const feed = !state.fed; state.fed = true;
+  $('#view').innerHTML = `<div class="grid">${renderSetup()}${renderReceipt(feed)}${renderEditor()}</div>`;
+}
+
+function renderSetup() {
+  const d = state.draft, act = live(), all7 = weekDays(d.week);
+  const sessions = new Set(act.flatMap(i => i.evidence.sessions)).size;
+  const commits = new Set(act.flatMap(i => i.evidence.commits)).size;
+  const projects = new Set(act.map(i => i.project).filter(Boolean)).size;
+  const done = d.pushed && !unlogged().length;
+  const eh = state.everhour === undefined ? 'Checking Everhour…'
+    : state.everhour === null ? "Couldn't read Everhour for this week."
+      : `Everhour already has <strong style="color:var(--chalk)">${fmt(state.everhour)} h</strong> for you this week.`;
+  const busy = !!state.busy;
+  return `
+    <section class="col-setup" aria-label="Week setup">
+      <div>
+        <h1>${d.pushed ? `Week ${weekNo(d.week)} is printed` : 'Your week, itemised'}</h1>
+        <p class="lede">${act.length ? `${plural(act.length, 'line')} across ${plural(projects, 'project')}, from ${plural(sessions, 'Claude session')} and ${plural(commits, 'commit')}.` : 'Nothing drafted for this week yet.'}</p>
+      </div>
+      <div>
+        <label class="label" for="total">Hours you worked</label>
+        <div class="total-row">
+          <input class="total-input" id="total" inputmode="decimal" value="${esc(d.totalHours ?? '')}" placeholder="0" autocomplete="off">
+          <button class="btn solid" data-act="itemise" ${busy || !act.length ? 'disabled' : ''}>${state.busy === 'itemise' ? 'Itemising…' : 'Itemise <span class="kbd">D</span>'}</button>
+        </div>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <button class="btn block" data-act="reweight" ${busy || !act.length ? 'disabled' : ''}>${state.busy === 'reweight' ? 'Estimating effort…' : 'Re-estimate effort and itemise'}</button>
+        <span class="faint">Effort ${d.weightsSource === 'claude' ? 'estimated by Claude' : d.weightsSource === 'heuristic' ? 'estimated from commits and sessions' : 'not estimated yet'}.</span>
+      </div>
+      <div>
+        <span class="label">Days that count</span>
+        <div class="days">${all7.map(x => `<button class="day-btn ${d.days.includes(x) ? 'on' : ''}" data-act="day" data-d="${x}" aria-pressed="${d.days.includes(x)}" aria-label="${dname(x)}">${dname(x)[0]}</button>`).join('')}</div>
+      </div>
+      <div class="divider"></div>
+      <div class="muted" style="font-size:14px">${eh}</div>
+      <div>
+        <span class="label">Before you print</span>
+        <div class="checks" aria-live="polite">
+          ${blocks().length ? '' : `<div class="check ok"><span class="ico">✓</span>${done ? 'Printed. Nothing left to do.' : 'Ready to print.'}</div>`}
+          ${state.warnings.map(w => {
+            const body = `<span class="ico">${w.level === 'block' ? '✗' : '!'}</span><span>${esc(w.message)}</span>`;
+            return w.itemId && findItem(w.itemId)
+              ? `<button class="check ${esc(w.level)}" data-act="pick" data-id="${esc(w.itemId)}">${body}</button>`
+              : `<div class="check ${esc(w.level)}">${body}</div>`;
+          }).join('')}
+        </div>
+      </div>
+      <div class="faint">Press <span class="kbd">?</span> for keyboard shortcuts, <span class="kbd">/</span> for commands.</div>
+    </section>`;
+}
+
+function renderReceipt(feed) {
+  const d = state.draft, act = live(), all7 = weekDays(d.week);
+  const sum = act.reduce((s, i) => s + (i.hours ?? 0), 0);
+  const per = projectNames().map(n => [n, act.filter(i => i.project === n).reduce((s, i) => s + (i.hours ?? 0), 0)]).filter(([, h]) => h > 0);
+  const other = act.filter(i => !projectNames().includes(i.project)).reduce((s, i) => s + (i.hours ?? 0), 0);
+  if (other) per.push(['No project', other]);
+  const billable = act.filter(i => kindOf(i.project) === 'billable').reduce((s, i) => s + (i.hours ?? 0), 0);
+  const parentCount = new Set(act.filter(i => i.project).map(i => `${i.day}|${i.project}`)).size;
+  const swatchFor = n => (n === 'No project' ? 'var(--bad-ink)' : color(n));
+  const showPrint = !d.pushed || unlogged().length > 0;
+  return `
+    <section class="col-receipt ${feed ? 'feed' : ''}" aria-label="Receipt">
+      <div class="slot"></div>
+      <div class="paper-wrap"><div class="paper">
+        <div class="paper-head">
+          <div style="font-weight:700;font-size:20px">my-timesheet</div>
+          <div>Week ${weekNo(d.week)}, ${pretty(all7[0])} to ${pretty(all7[6])}</div>
+          <div class="dash"></div>
+        </div>
+        <div class="paper-scroll" data-keep-scroll="receipt">
+          ${act.length ? groupedDays().map(renderDay).join('') : '<div class="empty">No lines yet.<br>Run <strong>/timesheet</strong> in Claude to draft this week, or add a line by hand.</div>'}
+          ${state.adding ? renderAddForm() : '<div style="padding:6px 0 10px"><button class="paper-btn" style="width:100%" data-act="add">+ Add a line by hand <span style="color:var(--ink-2)">(a)</span></button></div>'}
+        </div>
+        <div class="paper-foot">
+          <div class="dash"></div>
+          <div class="split-bar" aria-hidden="true">${per.map(([n, h]) => `<span style="width:${sum ? (h / sum) * 100 : 0}%;background:${swatchFor(n)}"></span>`).join('')}</div>
+          <div class="legend">${per.map(([n, h]) => `<span><span class="swatch" style="background:${swatchFor(n)}"></span><span class="n">${esc(n)}</span><span class="v">${fmt(h)}</span></span>`).join('')}</div>
+          <div class="r-total"><span>Total</span><span>${fmt(sum)} h</span></div>
+          <div class="r-sub"><span>You worked ${d.totalHours == null ? '—' : `${fmt(d.totalHours)} h`}</span><span>${sum ? Math.round((billable / sum) * 100) : 0}% billable</span></div>
+          <div class="foot-row"><span class="barcode" aria-hidden="true">W${weekNo(d.week)}-${all7[0].slice(0, 4)}</span><span>${plural(act.length, 'sub-issue')}<br>${plural(parentCount, 'parent')}</span></div>
+        </div>
+        ${d.pushed ? '<div class="stamp">LOGGED</div>' : ''}
+      </div></div>
+      <div class="tear"></div>
+      ${showPrint ? `<button class="btn amber print-btn" data-act="print" ${act.length ? '' : 'disabled'}>Print to Linear and Everhour <span class="kbd">P</span></button>` : ''}
+    </section>`;
+}
+
+function renderDay(day) {
+  const open = !state.collapsed.has(day.day);
+  const head = `<button class="r-dayhead" data-act="collapse" data-d="${day.day}" ${day.counted ? `data-dropday="${day.day}"` : ''} aria-expanded="${open}"><span><span class="chev">▾</span>${dname(day.day)}${day.counted ? '' : ' (not counted)'}<span class="meta">${plural(day.count, 'line')}</span></span><span>${fmt(day.total)}</span></button>`;
+  if (!open) return `<div class="r-day">${head}</div>`;
+  return `<div class="r-day">${head}${day.groups.map(g => {
+    const parent = g.key ? state.draft.parents.find(p => p.key === `${day.day}|${g.key}`) : null;
+    const label = g.key ? esc(parentTitle(day.day, g.key)) : 'No project yet';
+    return `<div class="r-parent"><span class="swatch" style="background:${g.key ? color(g.key) : 'var(--bad-ink)'}"></span><span>${label}</span>${parent?.linear?.created ? `<span class="pid">${linearLink(parent.linear)}</span>` : ''}</div>
+      ${g.items.map(renderLine).join('')}`;
+  }).join('')}</div>`;
+}
+
+function renderLine(i) {
+  const cls = ['r-line', i.id === state.sel ? 'sel' : '', i.project ? '' : 'unassigned', isPushed(i) ? 'pushed' : '', state.mergeFrom === i.id ? 'mark-merge' : ''].filter(Boolean).join(' ');
+  const hours = `${isPushed(i) && i.linear.identifier ? `${esc(i.linear.identifier)} ` : ''}${i.locked ? '* ' : ''}${fmt(i.hours)}`;
+  return `<button class="${cls}" data-act="pick" data-id="${esc(i.id)}" aria-pressed="${i.id === state.sel}" draggable="${!isFrozen(i)}">
+    <span class="t">${esc(i.title)}</span><span class="lead"></span><span class="h ${state.flash.has(i.id) ? 'flash' : ''}">${hours}</span></button>`;
+}
+
+function renderAddForm() {
+  const days = state.draft.days.length ? [...state.draft.days].sort() : weekDays(state.week);
+  const dayNow = state.addDay ?? (days.includes(findItem(state.sel)?.day) ? findItem(state.sel).day : days[0]);
+  return `<form class="add-form" id="addform">
+    <input id="add-title" placeholder="Title, 2 to 3 words" required aria-label="Title" autocomplete="off">
+    <input id="add-desc" placeholder="What you did" aria-label="What you did" autocomplete="off">
+    <div class="two">
+      <div>${select('add-project', projectOptions(), state.addProject ?? projectNames()[0], v => { state.addProject = v; }, { paper: true, label: 'Project' })}</div>
+      <div>${select('add-day', days.map(x => ({ v: x, label: dname(x) })), dayNow, v => { state.addDay = v; }, { paper: true, label: 'Day' })}</div>
+    </div>
+    <div class="two"><button class="paper-btn solid" type="submit">Add line</button><button class="paper-btn" type="button" data-act="cancel-add">Cancel</button></div>
+  </form>`;
+}
+
+function renderEditor() {
+  const it = findItem(state.sel);
+  if (!it) return '<section class="col-editor" aria-label="Line editor"><h1 style="font-size:20px">No line selected</h1><p class="muted" style="margin:0">Pick a line on the receipt, or add one by hand.</p></section>';
+  const ro = isPushed(it), frozen = isFrozen(it);
+  const others = live().filter(i => i.id !== it.id && !isFrozen(i));
+  const days = weekDays(state.draft.week);
+  const ev = it.evidence;
+  const f = `data-for="${esc(it.id)}"`;
+  return `
+    <section class="col-editor" aria-label="Line editor" data-keep-scroll="editor">
+      <div class="ed-head"><span class="faint">${dname(it.day)} line</span>${ro ? `<span class="chip">in Linear as <span class="linear-id">${linearLink(it.linear)}</span></span>` : (it.locked ? '<span class="chip">locked</span>' : '')}</div>
+      ${ro ? `<p class="muted" style="margin:0">Already in Linear${it.everhour?.logged ? ' and Everhour' : ''}, so it can't change here.</p>` : ''}
+      <div><label class="label" for="ed-title">Title, 2 to 3 words</label><input class="ed-input" id="ed-title" ${f} value="${esc(it.title)}" autocomplete="off" ${ro ? 'disabled' : ''}></div>
+      <div><label class="label" for="ed-desc">What you did</label><textarea class="ed-text" id="ed-desc" ${f} ${ro ? 'disabled' : ''}>${esc(it.description)}</textarea></div>
+      <div class="two-col">
+        <div><span class="label">Project</span>${select('ed-project', projectOptions(), it.project, v => setField(it, 'project', v), { disabled: ro, placeholder: 'Pick a project', label: 'Project' })}</div>
+        <div><span class="label">Day</span>${select('ed-day', days.map(x => ({ v: x, label: dname(x), hint: state.draft.days.includes(x) ? '' : 'not counted' })), it.day, v => setField(it, 'day', v), { disabled: ro, label: 'Day' })}</div>
+      </div>
+      <div class="faint" style="margin-top:-6px">Why ${it.project ? esc(it.project) : 'unsure'}: ${esc(it.bucketReason || 'no reason given')}</div>
+      <div>
+        <span class="label">Hours</span>
+        <div class="stepper">
+          <button class="icon-btn" data-act="less" aria-label="Half an hour less" ${frozen ? 'disabled' : ''}>−</button>
+          <span class="val ${state.flash.has(it.id) ? 'flash' : ''}">${fmt(it.hours)}</span>
+          <button class="icon-btn" data-act="more" aria-label="Half an hour more" ${frozen ? 'disabled' : ''}>+</button>
+          <button class="btn" data-act="lock" aria-pressed="${it.locked}" ${ro ? 'disabled' : ''}>${it.locked ? 'Unlock' : 'Lock'}</button>
+        </div>
+        <div class="faint" style="margin-top:6px">${it.locked ? 'Locked. Itemise leaves these hours alone.' : 'Changing hours locks the line and rebalances the rest.'}</div>
+      </div>
+      <div class="divider"></div>
+      <div>
+        <span class="label">Where it came from</span>
+        <div class="chips">${ev.manual ? '<span class="chip">added by hand</span>' : `<span class="chip">${plural(ev.commits.length, 'commit')}</span><span class="chip">${plural(ev.sessions.length, 'Claude session')}</span>`}${it.edited && !ev.manual ? '<span class="chip">edited by you</span>' : ''}</div>
+        <div class="faint" style="margin-top:6px">${it.weight != null ? `Effort ${Math.round(it.weight * 10) / 10} of 10${it.weightReason ? `: ${esc(it.weightReason)}` : ''}.` : 'Effort not estimated yet.'}</div>
+      </div>
+      ${frozen ? '' : `<div class="actions">
+        <div class="wide">${select('ed-merge', others.map(o => ({ v: o.id, label: o.title, hint: dname(o.day).slice(0, 3), color: o.project ? color(o.project) : 'var(--bad-ink)' })), null, v => mergeInto(it.id, v), { placeholder: 'Merge another line into this one', label: 'Merge another line into this one', disabled: !others.length })}</div>
+        <button class="btn" data-act="split">Split in two <span class="kbd">s</span></button>
+        <button class="btn danger ${state.armedDelete === it.id ? 'armed' : ''}" data-act="delete">${state.armedDelete === it.id ? 'Press again' : 'Delete line'}</button>
+      </div>`}
+    </section>`;
+}
+
+// ---------- print ----------
+const PHASES = ['parents', 'issues', 'sync', 'time'];
+
+function newPrint(draft, stage) {
+  const pending = draft.items.filter(i => !i.deleted && !i.everhour?.logged);
+  return {
+    week: draft.week, stage, ehHours: null, lastPhase: 'parents', seen: new Map(),
+    ids: pending.map(i => i.id),
+    parents: new Set(pending.filter(i => i.project).map(i => `${i.day}|${i.project}`)).size,
+    hours: pending.reduce((s, i) => s + (i.hours ?? 0), 0),
+    projects: [...new Set(pending.map(i => i.project).filter(Boolean))],
   };
-  el.innerHTML = lines[p.status] ?? '';
-  $('#continue')?.addEventListener('click', requestPush);
 }
 
-function render() {
-  renderHeader();
-  if (state.tab === 'week') renderWeek();
-  else (state.tab === 'settings' ? renderSettings() : renderHistory()).catch(e => flash(e.message));
-  renderStatus();
-  renderPush();
-}
-
-/** Shows an inline (y/n) question in the push panel; y runs yes(). */
-function ask(text, yes) { state.confirm = { text, yes }; renderPush(); }
-
-/** P, the palette's push, and the continue/retry buttons. Continuing after awaiting_sync needs no extra confirm. */
+/** P, the Print button, the palette's print. Continuing after awaiting_sync needs no extra confirm. */
 function requestPush() {
-  if (state.push?.status === 'awaiting_sync') return startPush(true);
-  const week = state.week;
-  ask(`push ${week} to Linear + Everhour?`, () => startPush(false));
+  if (!state.draft || !live().length) return;
+  if (state.push?.status === 'awaiting_sync') {
+    if (!state.print) state.print = newPrint(state.draft, 'server');
+    render();
+    return startPush(true);
+  }
+  if (state.push?.status === 'running') { state.print ??= newPrint(state.draft, 'server'); render(); return pollPush(); }
+  state.print = newPrint(state.draft, blocks().length ? 'blocked' : 'confirm');
+  state.help = false;
+  render();
 }
 
 async function startPush(confirm) {
   await save();
   const week = state.week;
-  try { await api('POST', '/api/push', { week, confirm }); } catch (e) {
-    if (e.status === 409 && e.body?.needsConfirm) {
-      const h = e.body.hours;
-      return ask(h == null ? `couldn't read Everhour for ${week}. push anyway?` : `Everhour already has ${h.toFixed(1)}h for ${week}. push anyway?`, () => startPush(true));
-    }
-    return flash(e.message);
+  state.print ??= newPrint(state.draft, 'server');
+  try {
+    await api('POST', '/api/push', { week, confirm });
+  } catch (e) {
+    if (e.status === 409 && e.body?.needsConfirm) { state.print.stage = 'everhour'; state.print.ehHours = e.body.hours; return render(); }
+    return toast(e.message); // 423 and the rest: just say why
   }
-  const poll = async () => {
-    state.push = await api('GET', `/api/push?week=${state.week}`);
-    renderPush();
-    if (state.push.status === 'running') setTimeout(poll, 400);
-    else await load(state.week);
+  state.print.stage = 'server';
+  state.push = { status: 'running', phase: 'parents', done: 0, total: 0 };
+  render();
+  pollPush();
+}
+
+let polling = false, refreshing = false;
+async function pollPush() {
+  if (polling) return;
+  polling = true;
+  const week = state.week;
+  try {
+    for (;;) {
+      const p = await api('GET', `/api/push?week=${week}`);
+      if (state.week !== week) return;
+      const prev = state.push;
+      state.push = p;
+      if (p.phase && state.print) state.print.lastPhase = p.phase;
+      if (p.status !== 'running') { await load(week); return; }
+      if (p.phase !== prev?.phase || p.done !== prev?.done) refreshDraft(week); // identifiers and logged hours appear as they land
+      render();
+      await sleep(400);
+    }
+  } catch (e) {
+    toast(e.message);
+  } finally { polling = false; }
+}
+
+async function refreshDraft(week) {
+  if (refreshing || state.saving || hasPending()) return;
+  refreshing = true;
+  try {
+    const s = await api('GET', `/api/state?week=${week}`);
+    if (state.week === week && !hasPending()) accept(s);
+  } catch { /* the next poll tries again */ } finally { refreshing = false; }
+}
+
+function renderPrint() {
+  const pr = state.print, p = state.push ?? { status: 'idle' };
+  const n = weekNo(pr.week);
+  const status = pr.stage === 'server' ? (p.status === 'idle' ? 'running' : p.status) : pr.stage;
+  const phase = status === 'awaiting_sync' ? 'sync' : status === 'running' ? (p.phase ?? 'parents') : pr.lastPhase;
+  const at = PHASES.indexOf(phase);
+  const stepState = k => (status === 'done' || PHASES.indexOf(k) < at ? 'done' : PHASES.indexOf(k) === at ? 'now' : '');
+  const totalFor = k => (k === 'parents' ? pr.parents : pr.ids.length);
+  const count = k => {
+    const s = stepState(k);
+    if (s === 'done') return k === 'time' ? `${fmt(pr.hours)} h` : `${totalFor(k)} of ${totalFor(k)}`;
+    if (s === 'now' && status === 'running') return `${p.done ?? 0} of ${p.total || totalFor(k)}`;
+    return '';
   };
-  poll().catch(e => flash(e.message));
+  const meter = k => (stepState(k) === 'now' && status === 'running' ? `<div class="meter"><span style="width:${Math.round(((p.done ?? 0) / Math.max(1, p.total || totalFor(k))) * 100)}%"></span></div>` : '');
+  const step = (k, num, title, note) => `<li class="step"><span class="mark ${stepState(k)}">${stepState(k) === 'done' ? '✓' : num}</span><div><div class="step-head"><span>${title}</span><span class="step-count">${count(k)}</span></div><div class="muted" style="font-size:14px">${note}</div>${meter(k)}</div></li>`;
+  const syncProjects = status === 'awaiting_sync' ? [...new Set((p.missing ?? []).map(m => m.project))] : [];
+  const projTag = name => `<span class="proj-tag"><span class="swatch" style="background:${color(name)}"></span>${esc(name)}</span>`;
+
+  let panel = '';
+  if (status === 'blocked') {
+    const list = pr.stage === 'blocked' ? blocks().map(w => w.message) : (p.warnings ?? []).map(w => w.message);
+    panel = `<div class="callout bad"><strong>Fix these before printing</strong>${list.map(m => `<div>✗ ${esc(m)}</div>`).join('')}<div><button class="btn" data-act="print-cancel">Back to the week</button></div></div>`;
+  } else if (status === 'confirm' || status === 'everhour') {
+    const q = status === 'confirm' ? `Print week ${n}?`
+      : pr.ehHours == null ? `Couldn't read Everhour for week ${n}. Print anyway?`
+        : `Everhour already has ${fmt(pr.ehHours)} h for you in week ${n}. Print anyway?`;
+    panel = `<div class="callout"><strong style="font-size:17px">${q}</strong><div>Creates ${plural(pr.parents, 'parent issue')} and ${plural(pr.ids.length, 'sub-issue')} in Linear across ${plural(pr.projects.length, 'project')}, assigned to you and set to Done, then logs ${fmt(pr.hours)} h in Everhour.</div><div class="row"><button class="btn ink" data-act="${status === 'confirm' ? 'print-go' : 'print-anyway'}">${status === 'confirm' ? 'Print' : 'Print anyway'} <span class="kbd">y</span></button><button class="btn" data-act="print-cancel">Not now <span class="kbd">n</span></button></div></div>`;
+  } else if (status === 'awaiting_sync') {
+    panel = `<div class="callout"><strong style="font-size:17px">One click in Everhour</strong><div>Everhour can't pull new Linear issues by itself. Open Everhour, go to Projects, and press Sync on each of these:</div><div class="row">${syncProjects.map(projTag).join('')}</div><div class="row"><button class="btn ink" data-act="synced">I pressed Sync, log the hours</button><a class="btn" style="text-decoration:none" href="https://app.everhour.com/" target="_blank" rel="noopener">Open Everhour</a><button class="btn" data-act="print-cancel">Later</button></div></div>`;
+  } else if (status === 'error') {
+    panel = `<div class="callout bad"><strong>Printing stopped</strong><div>${esc(p.error ?? 'Something went wrong.')}</div><div class="row"><button class="btn" data-act="print-retry">Try again</button><button class="btn" data-act="print-cancel">Back to the week</button></div></div>`;
+  } else if (status === 'done') {
+    panel = '<div><button class="btn solid" data-act="print-close">Back to the week</button></div>';
+  }
+
+  const headline = { blocked: `Week ${n} can't print yet`, confirm: `Print week ${n}`, everhour: `Print week ${n}`, running: `Printing week ${n}`, awaiting_sync: `Printing week ${n}`, error: `Printing week ${n}`, done: `Week ${n} is printed` }[status];
+  const sub = {
+    blocked: 'Nothing was sent.',
+    confirm: 'Check the receipt one more time.',
+    everhour: 'Check the receipt one more time.',
+    running: phase === 'time' ? 'Logging hours in Everhour.' : 'Creating issues in Linear. Safe to run again if it stops.',
+    awaiting_sync: 'Linear has every issue. Everhour needs one click from you before the hours can go in.',
+    error: 'Everything done so far is saved. Printing again picks up where it stopped.',
+    done: `${plural(pr.ids.length, 'sub-issue')} under ${plural(pr.parents, 'parent')} are in Linear, and ${fmt(pr.hours)} h are in Everhour. Printing again changes nothing.`,
+  }[status];
+  const showSteps = status !== 'blocked' && status !== 'confirm' && status !== 'everhour';
+
+  const rows = pr.ids.map(id => state.draft.items.find(i => i.id === id)).filter(Boolean);
+  const logged = rows.filter(i => i.everhour?.logged).reduce((s, i) => s + (i.hours ?? 0), 0);
+  const firstPaint = pr.seen.size === 0;
+  const rowHtml = rows.map(i => {
+    const ident = i.linear?.identifier ?? '';
+    const on = !!i.everhour?.logged;
+    const key = `${ident}|${on}`;
+    const appear = !firstPaint && pr.seen.get(i.id) !== key;
+    pr.seen.set(i.id, key);
+    return `<div class="p-row ${appear ? 'appear' : ''}"><span class="swatch" style="background:${color(i.project)}"></span><span class="w">${ident ? linearLink(i.linear) : '·······'}</span><span class="t">${esc(i.title)}</span><span class="h ${on ? 'on' : 'wait'}">${on ? fmt(i.hours) : 'waiting'}</span></div>`;
+  }).join('');
+
+  $('#view').innerHTML = `
+    <div class="print">
+      <section class="print-main">
+        <div><h1 style="font-size:36px">${headline}</h1><p class="lede" style="font-size:16px;max-width:54ch">${sub}</p></div>
+        ${showSteps ? `<ol class="steps">
+          ${step('parents', 1, 'Parent issues in Linear', 'One per day and project, assigned to you, set to Done.')}
+          ${step('issues', 2, 'Sub-issues in Linear', 'Each under its day. No hours in any title or description.')}
+          ${step('sync', 3, 'Sync in Everhour', status === 'awaiting_sync' ? `${plural((p.missing ?? []).length, 'issue')} aren't in Everhour yet.` : 'Everhour finds every sub-issue.')}
+          ${step('time', 4, 'Hours on each sub-issue', 'Logged on the day each line belongs to.')}
+        </ol>` : ''}
+        ${panel}
+      </section>
+      <section class="col-receipt" aria-label="Print receipt">
+        <div class="slot"></div>
+        <div class="paper-wrap"><div class="paper">
+          <div class="paper-head"><div style="font-weight:700;font-size:19px">Linear and Everhour</div><div>Week ${n}</div><div class="dash"></div></div>
+          <div class="paper-scroll" data-keep-scroll="print">${rowHtml || '<div class="empty">Nothing left to print.</div>'}</div>
+          <div class="paper-foot"><div class="dash"></div><div class="r-total" style="font-size:22px"><span>Logged</span><span>${fmt(logged)} h</span></div><div class="barcode" aria-hidden="true">W${n}</div></div>
+          ${status === 'done' ? '<div class="stamp">LOGGED</div>' : ''}
+        </div></div>
+        <div class="tear"></div>
+      </section>
+    </div>`;
 }
 
-function edit(id) { state.editing = id; renderWeek(); }
-function commitEdit() {
-  const it = state.draft.items.find(i => i.id === state.editing);
-  if (it) { it.title = $('.edit-title').value.trim() || it.title; it.description = $('.edit-desc').value.trim() || it.description; }
-  state.editing = null; renderWeek(); scheduleSave();
+function closePrint() {
+  if (state.push?.status === 'running') return toast('Printing is still running.');
+  state.print = null; state.fed = false; render();
 }
 
-function addItem() {
-  const day = focused()?.day ?? state.draft.days[0];
-  const row = document.createElement('div');
-  row.className = 'row additem';
-  row.innerHTML = `<input id="newtitle" placeholder="title (2–3 words)"> <input id="newdesc" placeholder="description"> <select id="newproj">${state.projects.map(p => `<option>${esc(p.name)}</option>`).join('')}</select> <select id="newday">${state.draft.days.map(d => `<option ${d === day ? 'selected' : ''}>${esc(d)}</option>`).join('')}</select> <button id="newok" class="accent">add</button>`;
-  $('#view').appendChild(row);
-  $('#newtitle').focus();
-  $('#newok').onclick = () => act('/api/items', { title: $('#newtitle').value, description: $('#newdesc').value, project: $('#newproj').value, day: $('#newday').value });
+// ---------- history ----------
+async function openHistory() {
+  state.tab = 'history'; state.print = null; render();
+  try { state.history = await api('GET', '/api/history'); } catch (e) { toast(e.message); state.history ??= []; }
+  if (state.tab === 'history') render();
 }
 
-const HELP = [['j / k', 'move'], ['e', 'edit title + description (Enter save, Esc cancel)'], ['p', 'cycle project'], ['[ / ]', 'hours −/+ 0.5 (locks item)'], ['L', 'lock / unlock hours'], ['d d', 'delete'], ['m', 'mark, then m on another item to merge'], ['s', 'split into 2'], ['a', 'add item'], ['D', 'distribute'], ['P', 'push'], ['/', 'command palette'], ['?', 'this help']];
+function renderHistory() {
+  if (!state.history) { $('#view').innerHTML = '<div style="padding-top:24px"><h1 style="font-size:36px">Past weeks</h1><p class="lede">Loading…</p></div>'; return; }
+  const weeks = [...state.history].sort((a, b) => a.week.localeCompare(b.week));
+  const max = Math.max(1, ...weeks.map(w => w.total));
+  const printed = weeks.filter(w => w.pushed);
+  const avg = printed.length ? printed.reduce((s, w) => s + w.total, 0) / printed.length : 0;
+  const used = new Set(weeks.flatMap(w => Object.keys(w.byProject ?? {})));
+  $('#view').innerHTML = `
+    <div style="padding-top:24px;display:flex;flex-direction:column;gap:22px">
+      <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-end;gap:20px">
+        <div><h1 style="font-size:36px">Past weeks</h1><p class="lede">Every week you've drafted. Taller receipts are longer weeks.</p></div>
+        <div><div style="font-family:var(--mono);font-weight:700;font-size:30px">${fmt(avg)} h</div><div class="faint">average over ${plural(printed.length, 'printed week')}</div></div>
+      </div>
+      <div class="hist">
+        ${weeks.length ? weeks.map((w, k) => {
+          const days = weekDays(w.week);
+          const parts = Object.entries(w.byProject ?? {}).filter(([, h]) => h > 0).sort(([a], [b]) => projectNames().indexOf(a) - projectNames().indexOf(b));
+          return `<button class="hist-card ${w.pushed ? '' : 'draft'}" data-act="open-week" data-w="${esc(w.week)}" style="height:${Math.round(150 + (w.total / max) * 280)}px;animation-delay:${k * 70}ms" aria-label="Week ${weekNo(w.week)}, ${fmt(w.total)} hours, ${w.pushed ? 'printed' : 'draft'}">
+            <span style="font-weight:700;font-size:17px">Week ${weekNo(w.week)}</span>
+            <span style="font-size:13px;color:var(--ink-2)">${pretty(days[0])} to ${pretty(days[6])}</span>
+            <span style="flex:1"></span>
+            ${parts.length ? `<span class="stack-bar">${parts.map(([pn, h]) => `<span title="${esc(pn)}" style="width:${w.total ? (h / w.total) * 100 : 0}%;background:${color(pn)}"></span>`).join('')}</span>` : ''}
+            <span class="big">${fmt(w.total)} h</span>
+            <span style="font-size:13px">${plural(w.items, 'line')}, ${w.pushed ? 'printed' : 'draft'}</span>
+          </button>`;
+        }).join('') : '<p class="hist-empty">No weeks drafted yet. Run /timesheet in Claude to draft one.</p>'}
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:16px">${projectNames().filter(pn => used.has(pn)).map(pn => `<span class="faint" style="display:inline-flex;align-items:center;gap:6px"><span class="swatch" style="background:${color(pn)}"></span>${esc(pn)}</span>`).join('')}</div>
+    </div>`;
+}
+
+// ---------- settings ----------
+async function openSettings() {
+  state.tab = 'settings'; state.print = null; render();
+  try { state.settings = await api('GET', '/api/settings'); } catch (e) { toast(e.message); }
+  if (state.tab === 'settings') render();
+}
+
+async function saveSettings() {
+  const s = state.settings;
+  state.settingsSaving = true; renderTop();
+  try {
+    await api('PUT', '/api/settings', {
+      projects: s.projects.map(({ name, kind }) => ({ name, kind })),
+      repos: s.repos.map(r => ({ root: r.root, class: r.class, project: r.class === 'work' ? r.project || undefined : undefined })),
+      workOrgs: s.workOrgs,
+      nudge: s.nudge,
+    });
+    for (const p of state.projects) p.kind = s.projects.find(x => x.name === p.name)?.kind ?? p.kind;
+  } catch (e) {
+    toast(e.message);
+    try { state.settings = await api('GET', '/api/settings'); } catch { /* keep what we have */ }
+    if (state.tab === 'settings') render();
+  } finally { state.settingsSaving = false; renderTop(); }
+}
+
+function renderSettings() {
+  const s = state.settings;
+  if (!s) { $('#view').innerHTML = '<div style="padding-top:24px"><h1 style="font-size:36px">Settings</h1><p class="lede">Loading…</p></div>'; return; }
+  const billable = s.projects.filter(p => p.kind === 'billable');
+  const repoOptions = r => {
+    const opts = [{ v: '', label: 'Ask me each time' }, ...billable.map(p => ({ v: p.name, label: `Bills to ${p.name}`, color: color(p.name) }))];
+    if (r.project && !opts.some(o => o.v === r.project)) opts.push({ v: r.project, label: `Bills to ${r.project}`, color: color(r.project) });
+    return opts;
+  };
+  $('#view').innerHTML = `
+    <div style="padding-top:24px"><h1 style="font-size:36px">Settings</h1><p class="lede" style="max-width:58ch">What counts as work, where it bills, and when to remind you.</p></div>
+    <div class="settings">
+      <section class="slip" aria-label="Repos">
+        <h2>Repos</h2>
+        <p>Only work repos are logged. Repos in your work orgs count as work automatically; anything else is asked about once.</p>
+        ${s.repos.length ? s.repos.map((r, k) => `<div class="slip-row">
+          <div class="slip-row inline flat">
+            <span class="repo-name" title="${esc(r.root)}">${r.class === 'work' && r.project ? `<span class="swatch" style="background:${color(r.project)}"></span>` : ''}<span>${esc(r.name ?? r.root)}</span></span>
+            <div class="seg">${['work', 'personal', 'ignore'].map(c => `<button class="${r.class === c ? 'on' : ''}" data-act="repo-cls" data-k="${k}" data-c="${c}" aria-pressed="${r.class === c}">${c[0].toUpperCase() + c.slice(1)}</button>`).join('')}</div>
+          </div>
+          ${r.class === 'work' ? select(`repo-${k}`, repoOptions(r), r.project ?? '', v => { r.project = v || undefined; saveSettings(); }, { paper: true, label: `Project for ${r.name ?? r.root}` }) : ''}
+        </div>`).join('') : '<p>No repos seen yet. They show up after your first Claude session in one.</p>'}
+      </section>
+      <div style="display:flex;flex-direction:column;gap:22px">
+        <section class="slip" aria-label="Projects">
+          <h2>Projects</h2>
+          ${s.projects.map((p, k) => `<div class="slip-row inline"><span class="repo-name"><span class="swatch" style="background:${color(p.name)}"></span><span>${esc(p.name)}</span></span><div class="seg">${['billable', 'internal'].map(c => `<button class="${p.kind === c ? 'on' : ''}" data-act="proj-kind" data-k="${k}" data-c="${c}" aria-pressed="${p.kind === c}">${c[0].toUpperCase() + c.slice(1)}</button>`).join('')}</div></div>`).join('')}
+          <p>To add a project, run <strong>timesheet init</strong> in a terminal.</p>
+        </section>
+        <section class="slip" aria-label="Work orgs">
+          <h2>Work orgs on GitHub</h2>
+          <label for="orgs">Comma-separated<input type="text" id="orgs" value="${esc(s.workOrgs.join(', '))}" autocomplete="off"></label>
+        </section>
+        <section class="slip" aria-label="Sunday reminder">
+          <h2>Sunday reminder</h2>
+          <div class="slip-row inline flat"><p>Claude mentions it once on Sunday evening or Monday if the week isn't printed.</p><div class="seg"><button class="${s.nudge ? 'on' : ''}" data-act="nudge" data-v="1" aria-pressed="${s.nudge}">On</button><button class="${!s.nudge ? 'on' : ''}" data-act="nudge" data-v="0" aria-pressed="${!s.nudge}">Off</button></div></div>
+        </section>
+        <p class="faint" style="margin:0">Your Linear and Everhour keys live in the macOS Keychain. To change them, run timesheet init in a terminal.</p>
+      </div>
+    </div>`;
+}
+
+// ---------- navigation and commands ----------
+function goWeek(week) {
+  state.tab = 'week'; state.print = null; state.fed = false;
+  return load(week).catch(e => toast(e.message));
+}
+function switchTab(tab) {
+  state.openSel = null;
+  if (tab === 'history') return openHistory();
+  if (tab === 'settings') return openSettings();
+  state.tab = 'week'; state.print = null; state.fed = false; render();
+}
+function runCommand(text) {
+  const [cmd, arg] = text.trim().split(/\s+/);
+  state.palette = false; render();
+  if (cmd === 'distribute' || cmd === 'itemise') distribute(false);
+  else if (cmd === 'reweight') distribute(true);
+  else if (cmd === 'push' || cmd === 'print') { state.tab = 'week'; requestPush(); }
+  else if (cmd === 'week' && arg) goWeek(arg);
+  else if (cmd === 'week' || cmd === 'history' || cmd === 'settings') switchTab(cmd);
+  else if (cmd) toast(`Unknown command: ${cmd}`);
+}
+
+// ---------- events ----------
+document.addEventListener('click', e => {
+  const t = e.target.closest('[data-act]');
+  if (state.openSel && (!t || (t.dataset.act !== 'sel-toggle' && t.dataset.act !== 'sel-pick'))) { state.openSel = null; if (!t) { render(); return; } }
+  if (!t || t.disabled) return;
+  const a = t.dataset.act;
+  const it = findItem(state.sel);
+  if (a !== 'delete') state.armedDelete = null;
+  switch (a) {
+    case 'sel-toggle': state.openSel = state.openSel === t.dataset.sel ? null : t.dataset.sel; state.selActive = 0; render(); break;
+    case 'sel-pick': pickSel(t.dataset.sel, +t.dataset.k); break;
+    case 'tab': switchTab(t.dataset.k); break;
+    case 'prev': case 'next': goWeek(shiftWeek(state.week, a === 'prev' ? -1 : 1)); break;
+    case 'open-week': goWeek(t.dataset.w); break;
+    case 'collapse': { const d = t.dataset.d; if (state.collapsed.has(d)) state.collapsed.delete(d); else state.collapsed.add(d); render(); break; }
+    case 'pick': {
+      const id = t.dataset.id;
+      if (state.mergeFrom && state.mergeFrom !== id && t.classList.contains('r-line')) { const target = findItem(id); if (target && !isFrozen(target)) { mergeInto(state.mergeFrom, id); break; } }
+      selectLine(id);
+      break;
+    }
+    case 'itemise': distribute(false); break;
+    case 'reweight': distribute(true); break;
+    case 'day': { const d = t.dataset.d, days = state.draft.days; state.draft.days = days.includes(d) ? days.filter(x => x !== d) : [...days, d].sort(); scheduleSave(); render(); break; }
+    case 'less': stepHours(it, -0.5, 1); break;
+    case 'more': stepHours(it, 0.5, 0); break;
+    case 'lock': if (it) setField(it, 'locked', !it.locked); break;
+    case 'split': splitLine(it); break;
+    case 'delete': deleteLine(it); break;
+    case 'add': openAdd(); break;
+    case 'cancel-add': state.adding = false; render(); break;
+    case 'print': requestPush(); break;
+    case 'print-go': startPush(false); break;
+    case 'print-anyway': case 'synced': startPush(true); break;
+    case 'print-retry': startPush(false); break;
+    case 'print-cancel': case 'print-close': closePrint(); break;
+    case 'repo-cls': { const r = state.settings.repos[+t.dataset.k]; r.class = t.dataset.c; if (r.class !== 'work') r.project = undefined; render(); saveSettings(); break; }
+    case 'proj-kind': state.settings.projects[+t.dataset.k].kind = t.dataset.c; render(); saveSettings(); break;
+    case 'nudge': state.settings.nudge = t.dataset.v === '1'; render(); saveSettings(); break;
+  }
+});
+
+document.addEventListener('change', e => {
+  const t = e.target;
+  const it = findItem(state.sel);
+  if (t.id === 'total') {
+    const v = t.value.trim() === '' ? null : Number(t.value);
+    if (v !== null && !(v > 0)) { toast('Hours must be a number above 0.'); t.value = state.draft.totalHours ?? ''; return; }
+    state.draft.totalHours = v; scheduleSave(); // no re-render, so a click on Itemise right after typing still lands
+  } else if (t.id === 'ed-title' && it && t.dataset.for === it.id) setField(it, 'title', t.value.trim() || it.title, false);
+  else if (t.id === 'ed-desc' && it && t.dataset.for === it.id) setField(it, 'description', t.value.trim() || it.description, false);
+  else if (t.id === 'orgs' && state.settings) { state.settings.workOrgs = t.value.split(',').map(x => x.trim()).filter(Boolean); saveSettings(); }
+});
+
+document.addEventListener('submit', e => {
+  if (e.target.id !== 'addform') return;
+  e.preventDefault();
+  submitAdd();
+});
 
 document.addEventListener('keydown', e => {
-  if (state.editing) {
-    if (e.key === 'Escape') { state.editing = null; renderWeek(); }
-    if (e.key === 'Enter' && !e.shiftKey && e.target.tagName !== 'TEXTAREA') { e.preventDefault(); commitEdit(); }
-    if (e.key === 'Enter' && e.metaKey) { e.preventDefault(); commitEdit(); }
-    return;
-  }
   if (e.metaKey || e.ctrlKey || e.altKey) return;
-  if (state.confirm && !['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) {
-    if (e.key !== 'y' && e.key !== 'n' && e.key !== 'Escape') return;
-    e.preventDefault();
-    const c = state.confirm;
-    state.confirm = null;
-    renderPush();
-    if (e.key === 'y') c.yes(); else flash('push cancelled');
+  const tag = e.target.tagName;
+  if (state.openSel) {
+    const s = SELS[state.openSel];
+    if (!s) { state.openSel = null; return; }
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); state.selActive = (state.selActive + (e.key === 'ArrowDown' ? 1 : -1) + s.options.length) % Math.max(1, s.options.length); render(); }
+    else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pickSel(state.openSel, state.selActive); }
+    else if (e.key === 'Escape' || e.key === 'Tab') { const id = state.openSel; state.openSel = null; render(); document.getElementById(id)?.focus(); }
     return;
   }
-  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) {
-    if (e.key === 'Escape') { e.target.blur(); $('#palette').hidden = true; }
+  if (TEXT_TAGS.includes(tag)) {
+    if (e.target.id === 'paletteinput') {
+      if (e.key === 'Enter') { e.preventDefault(); runCommand(e.target.value); }
+      else if (e.key === 'Escape') { state.palette = false; render(); }
+      return;
+    }
+    if (e.key === 'Escape') { if (e.target.closest('#addform')) { state.adding = false; render(); } else e.target.blur(); }
+    if (e.key === 'Enter' && tag === 'INPUT' && e.target.closest('.col-editor, .col-setup')) e.target.blur();
     return;
   }
-  if (state.tab !== 'week' && !['/', '?'].includes(e.key)) return;
-  const it = focused();
-  const n = itemRows().length;
+  if (e.target.classList?.contains('sel-btn') && (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); state.openSel = e.target.id; state.selActive = 0; render(); return; }
   const k = e.key;
-  if (k === 'j') state.focus = Math.min(n - 1, state.focus + 1);
-  else if (k === 'k') state.focus = Math.max(0, state.focus - 1);
-  else if (k === 'e' && it && !it.linear) { e.preventDefault(); return edit(it.id); }
-  else if (k === 'p' && it && !it.linear) { const names = state.projects.map(p => p.name); it.project = names[(names.indexOf(it.project) + 1) % names.length]; scheduleSave(); }
-  else if ((k === '[' || k === ']') && it && !it.linear) return act('/api/hours', { id: it.id, hours: Math.max(0.5, (it.hours ?? 0.5) + (k === ']' ? 0.5 : -0.5)) });
-  else if (k === 'L' && it && !it.linear) { it.locked = !it.locked; scheduleSave(); }
-  else if (k === 'd' && it && !it.linear) { if (state.armedDelete === it.id) { state.armedDelete = null; return act('/api/delete', { id: it.id }); } state.armedDelete = it.id; flash('press d again to delete'); }
-  else if (k === 'm' && it && !it.linear) { if (state.mergeFrom && state.mergeFrom !== it.id) { const ids = [state.mergeFrom, it.id]; state.mergeFrom = null; return act('/api/merge', { ids }); } state.mergeFrom = it.id; flash('marked, press m on another item to merge'); }
-  else if (k === 's' && it && !it.linear) return act('/api/split', { id: it.id, parts: 2 });
-  else if (k === 'a') { e.preventDefault(); return addItem(); }
-  else if (k === 'D') return act('/api/distribute', { reweight: false });
-  else if (k === 'P') return requestPush();
-  else if (k === '/') { e.preventDefault(); $('#palette').hidden = false; $('#paletteinput').value = ''; return $('#paletteinput').focus(); }
-  else if (k === '?') { const h = $('#help'); h.hidden = !h.hidden; h.innerHTML = HELP.map(([a, b]) => `<div><span class="key">${a}</span> ${b}</div>`).join(''); return; }
-  else return;
-  renderWeek(); renderStatus();
+  if (state.print && (state.print.stage === 'confirm' || state.print.stage === 'everhour')) {
+    if (k === 'y') { e.preventDefault(); return startPush(state.print.stage === 'everhour'); }
+    if (k === 'n' || k === 'Escape') { e.preventDefault(); toast('Not printed.'); return closePrint(); }
+  }
+  if (k === '?') { state.help = !state.help; return renderOverlay(); }
+  if (k === '/') { e.preventDefault(); state.palette = true; state.help = false; render(); return $('#paletteinput')?.focus(); }
+  if (k === 'Escape') { state.help = false; state.mergeFrom = null; state.armedDelete = null; if (state.print) return closePrint(); return render(); }
+  if (state.tab !== 'week' || state.print || !state.draft) return;
+  const lines = visibleLines();
+  const it = findItem(state.sel);
+  const editable = it && !isFrozen(it);
+  if (k === 'j' || k === 'k') {
+    const idx = lines.findIndex(i => i.id === state.sel);
+    const next = lines[Math.max(0, Math.min(lines.length - 1, idx + (k === 'j' ? 1 : -1)))];
+    if (next) selectLine(next.id);
+  }
+  else if (k === 'e' && editable) { e.preventDefault(); $('#ed-title')?.focus(); $('#ed-title')?.select(); }
+  else if (k === 'p' && editable) { const names = projectNames(); if (names.length) setField(it, 'project', names[(names.indexOf(it.project) + 1) % names.length]); }
+  else if ((k === '[' || k === ']') && editable) stepHours(it, k === ']' ? 0.5 : -0.5, 0.5);
+  else if (k === 'L' && editable) setField(it, 'locked', !it.locked);
+  else if (k === 's' && editable) splitLine(it);
+  else if (k === 'm' && editable) toggleMark(it);
+  else if (k === 'd' && editable) deleteLine(it);
+  else if (k === 'a') { e.preventDefault(); openAdd(); }
+  else if (k === 'D') distribute(false);
+  else if (k === 'P') requestPush();
 });
 
-$('#paletteinput').addEventListener('keydown', e => {
-  if (e.key !== 'Enter') return;
-  const [cmd, arg] = e.target.value.trim().split(/\s+/);
-  $('#palette').hidden = true;
-  e.target.blur();
-  if (cmd === 'distribute') act('/api/distribute', { reweight: false });
-  else if (cmd === 'reweight') act('/api/distribute', { reweight: true });
-  else if (cmd === 'push') requestPush();
-  else if (cmd === 'week' && arg) load(arg).catch(e => flash(e.message));
-  else if (cmd === 'settings' || cmd === 'history' || cmd === 'week') { state.tab = cmd === 'week' ? 'week' : cmd; render(); }
-});
-
-document.addEventListener('click', e => {
-  if (state.editing && e.target.closest('.edit-title, .edit-desc')) return;
-  const t = e.target.closest('button, .row.item, .row.add, .row.hist');
-  if (!t) return;
-  if (t.dataset.tab) { state.tab = t.dataset.tab; return render(); }
-  if (t.dataset.day) { const d = state.draft.days; state.draft.days = d.includes(t.dataset.day) ? d.filter(x => x !== t.dataset.day) : [...d, t.dataset.day].sort(); renderWeek(); renderHeader(); return scheduleSave(); }
-  if (t.id === 'distribute') return act('/api/distribute', { reweight: false });
-  if (t.id === 'reweight') return act('/api/distribute', { reweight: true });
-  if (t.id === 'prev' || t.id === 'next') { const [y, w] = state.week.split('-W').map(Number); const d = new Date(Date.UTC(y, 0, 4 + (w - 1) * 7 + (t.id === 'next' ? 7 : -7))); return load(isoWeek(d)).catch(e => flash(e.message)); }
-  if (t.classList.contains('item')) { state.focus = itemRows().findIndex(r => r.item.id === t.dataset.id); renderWeek(); renderStatus(); }
-  if (t.classList.contains('add')) addItem();
-  if (t.classList.contains('hist')) { state.tab = 'week'; load(t.dataset.week).catch(e => flash(e.message)); }
-});
-
-function isoWeek(d) {
-  const t = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
-  const dow = (t.getUTCDay() + 6) % 7; t.setUTCDate(t.getUTCDate() - dow + 3);
-  const y = t.getUTCFullYear(); const j4 = new Date(Date.UTC(y, 0, 4));
-  return `${y}-W${String(1 + Math.round(((t - j4) / 86400000 - 3 + ((j4.getUTCDay() + 6) % 7)) / 7)).padStart(2, '0')}`;
-}
-
-$('#total').addEventListener('change', e => {
-  const v = e.target.value.trim() === '' ? null : Number(e.target.value);
-  if (v !== null && !(v > 0)) return flash('total must be a positive number');
-  state.draft.totalHours = v; scheduleSave();
-});
-
-document.addEventListener('dragstart', e => { const r = e.target.closest('.row.item'); if (r) e.dataTransfer.setData('text/plain', r.dataset.id); });
-document.addEventListener('dragover', e => { if (e.target.closest('[data-dropday]')) e.preventDefault(); });
+// drag a line onto a counted day's heading to move it there
+document.addEventListener('dragstart', e => { const r = e.target.closest?.('.r-line'); if (r) e.dataTransfer.setData('text/plain', r.dataset.id); });
+document.addEventListener('dragover', e => { const h = e.target.closest?.('[data-dropday]'); if (h) { e.preventDefault(); h.classList.add('drop'); } });
+document.addEventListener('dragleave', e => { e.target.closest?.('[data-dropday]')?.classList.remove('drop'); });
 document.addEventListener('drop', e => {
-  const target = e.target.closest('[data-dropday]');
-  if (!target || target.dataset.dropday === 'not counted') return;
+  const target = e.target.closest?.('[data-dropday]');
+  if (!target) return;
   e.preventDefault();
-  const it = state.draft.items.find(i => i.id === e.dataTransfer.getData('text/plain'));
-  if (it && !it.linear) { it.day = target.dataset.dropday; renderWeek(); scheduleSave(); }
+  const it = findItem(e.dataTransfer.getData('text/plain'));
+  if (it && !isFrozen(it)) setField(it, 'day', target.dataset.dropday);
+  else render();
 });
+
+/** True while the person is typing somewhere a reload would wipe. */
+function isEditing() {
+  const ae = document.activeElement;
+  return state.adding || !!state.openSel || state.palette || (!!ae && TEXT_TAGS.includes(ae.tagName));
+}
 
 setInterval(async () => {
   if (!state.draft || state.saving) return;
   try {
     const { rev } = await api('GET', `/api/rev?week=${state.week}`);
-    if (rev > state.base.rev && !pendingPatches().items.length && !state.editing) await load(state.week);
+    if (rev > state.base.rev && !hasPending() && !isEditing()) await load(state.week);
   } catch { /* server stopped */ }
 }, 2000);
 
-load(state.week).catch(e => { $('#view').innerHTML = `<div class="bad">✗ ${esc(e.message)}</div>`; });
+load(state.week).catch(e => { state.loadError = e.message; render(); });
