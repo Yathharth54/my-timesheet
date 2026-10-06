@@ -155,6 +155,20 @@ describe('review server', () => {
     expect(r.json.map((w: { week: string }) => w.week)).toEqual([W]);
   });
 
+  it('history sums live item hours per project', async () => {
+    saveDraft(syncParents(makeDraft({ week: '2026-W40', rev: 0, items: [
+      makeItem({ id: 'x', project: 'Boxsy', hours: 2 }),
+      makeItem({ id: 'y', project: 'Boxsy', hours: 1.5 }),
+      makeItem({ id: 'z', project: 'Dev - Internal', hours: 3 }),
+      makeItem({ id: 'gone', project: 'Boxsy', hours: 9, deleted: true }),
+      makeItem({ id: 'none', project: null, hours: 1 }),
+    ] })));
+    const r = await api('GET', '/api/history');
+    const w40 = r.json.find((w: { week: string }) => w.week === '2026-W40');
+    expect(w40.byProject).toEqual({ Boxsy: 3.5, 'Dev - Internal': 3 });
+    expect(w40.total).toBe(7.5);
+  });
+
   const raw = (method: string, p: string, headers: Record<string, string>, body?: string) =>
     fetch(srv.url + p, { method, headers, body }).then(async r => ({ status: r.status, json: await r.json() }));
 

@@ -204,7 +204,9 @@ export function createServer(deps: ServerDeps = {}): http.Server {
           const d = loadDraft(w);
           if (!d) return [];
           const live = d.items.filter(i => !i.deleted);
-          return [{ week: w, total: live.reduce((s, i) => s + (i.hours ?? 0), 0), items: live.length, pushed: d.pushed }];
+          const byProject: Record<string, number> = {};
+          for (const i of live) if (i.project && i.hours != null) byProject[i.project] = (byProject[i.project] ?? 0) + i.hours;
+          return [{ week: w, total: live.reduce((s, i) => s + (i.hours ?? 0), 0), items: live.length, pushed: d.pushed, byProject }];
         }));
         case 'GET /api/settings': {
           const c = requireConfig();
