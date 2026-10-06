@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>timesheet</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header id="top">
+    <nav id="tabs"><button data-tab="week">week</button><button data-tab="settings">settings</button><button data-tab="history">history</button></nav>
+    <div id="weekbar">
+      <button id="prev" title="previous week">◂</button><span id="weeklabel"></span><button id="next" title="next week">▸</button>
+      <span id="days"></span>
+      <label>total <input id="total" inputmode="decimal" size="5" aria-label="total hours"></label>
+      <button id="distribute" class="accent">distribute</button>
+      <button id="reweight">re-weight</button>
+      <span id="everhour" class="dim"></span>
+    </div>
+    <div id="warnings"></div>
+  </header>
+  <main id="view"></main>
+  <section id="pushpanel" hidden></section>
+  <div id="palette" hidden><input id="paletteinput" placeholder="distribute · reweight · push · week 2026-W40 · settings · history"></div>
+  <div id="help" hidden></div>
+  <footer id="status"></footer>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
