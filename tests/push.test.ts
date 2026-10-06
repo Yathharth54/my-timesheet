@@ -63,6 +63,7 @@ describe('push', () => {
     linear.loseResponseEvery = 3;
     const everhour = new FakeEverhour();
     everhour.failEvery = 3;
+    everhour.loseResponseEvery = 2;
     let saved = structuredClone(readyDraft());
     let result;
     for (let run = 0; run < 100; run++) {
@@ -75,6 +76,19 @@ describe('push', () => {
     expect(result?.status).toBe('done');
     expect(linear.issues.size).toBe(7);
     expect(everhour.times.size).toBe(4);
+    expect([...everhour.times.values()].reduce((a, b) => a + b, 0)).toBe(8.5);
+  });
+
+  it('never doubles hours when a POST /time response is lost, even if Everhour adds', async () => {
+    const linear = new FakeLinear();
+    const everhour = new FakeEverhour();
+    everhour.loseResponseEvery = 1;
+    let saved = structuredClone(readyDraft());
+    await expect(push(structuredClone(saved), { linear, everhour, config: testConfig(), save: x => { saved = structuredClone(x); }, newUuid, concurrency: 1 })).rejects.toThrow('socket hang up');
+    everhour.loseResponseEvery = 0;
+    const r = await push(structuredClone(saved), { linear, everhour, config: testConfig(), save: x => { saved = structuredClone(x); }, newUuid, concurrency: 1 });
+    expect(r.status).toBe('done');
+    expect(everhour.posts).toBe(4);
     expect([...everhour.times.values()].reduce((a, b) => a + b, 0)).toBe(8.5);
   });
 

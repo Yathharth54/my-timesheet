@@ -175,7 +175,7 @@ In the style of uv: short and quiet.
 1. **Linear parents.** `issueCreate` with team, project, assignee, configured state and optional labels, and no `parentId`. The UUID is saved to `draft.json` straight away.
 2. **Linear sub-issues.** The same, with `parentId`, at most 5 at a time, retrying with backoff on 429, 5xx or network errors.
 3. **Everhour sync (manual click; see Verified facts).** The UI and CLI ask the user to click Sync in Everhour for the projects touched, then press Continue. The tool then polls `GET /tasks/li:{uuid}` until every sub-issue exists. Nothing is logged until all tasks exist. `POST /projects/li:{linearProjectId}/sync` is still called first in case Everhour fixes this, but the flow doesn't rely on it.
-4. **Log time** on sub-issues only: `POST /time` with `{task: "li:{uuid}", user, date: item.day, time: hours×3600}`. Everhour upserts one record per (user, date, task), so repeating the call is safe and needs no read-before-write. Throttled to stay under Everhour's rate limit.
+4. **Log time** on sub-issues only: `POST /time` with `{task: "li:{uuid}", user, date: item.day, time: hours×3600}`. Whether Everhour upserts or adds is unverified, so each call reads the day's records first (`GET /users/{id}/time?from=date&to=date`): the same seconds already logged on that task → skip; otherwise POST. `POST /time` is never retried automatically; a lost response is resolved by the next run's read. Throttled to stay under Everhour's rate limit.
 
 **Resuming:** every step saves its result per item as it goes, so re-running the push resumes where it stopped.
 
@@ -224,7 +224,7 @@ In the style of uv: short and quiet.
 
 **Hooks:** a timing check (<50ms), and confirming that unknown or personal repos write nothing.
 
-**Smoke test:** a throwaway Linear project plus the real Everhour account, run once before the first real week.
+**Smoke test:** a throwaway Linear project plus the real Everhour account, run once before the first real week. It also verifies that `POST /time` upserts one record per (user, date, task) rather than adding.
 
 ## 13. Out of scope (v1)
 

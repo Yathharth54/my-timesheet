@@ -1,5 +1,5 @@
 import type { LinearApi, CreateIssueInput } from '../src/lib/linear.js';
-import type { EverhourApi } from '../src/lib/everhour.js';
+import { logTimeOnce, type AddTime, type EverhourApi, type TimeRecord } from '../src/lib/everhour.js';
 
 export class FakeLinear implements LinearApi {
   issues = new Map<string, { input: CreateIssueInput; identifier: string }>();
@@ -25,21 +25,32 @@ export class FakeLinear implements LinearApi {
   }
 }
 
+/** Everhour fake. POST /time is modelled as ADDITIVE (the worst case), so only the read-before-write keeps hours exact. */
 export class FakeEverhour implements EverhourApi {
   autoSync = true;
   known = new Set<string>();
+  /** hours per `${issueUuid}|${date}` */
   times = new Map<string, number>();
   posts = 0;
   syncs: string[] = [];
   failEvery = 0;
+  /** every Nth POST /time is stored but its response is lost */
+  loseResponseEvery = 0;
   private calls = 0;
   private tick() { this.calls++; if (this.failEvery && this.calls % this.failEvery === 0) throw new Error('HTTP 502'); }
   async syncProject(id: string) { this.syncs.push(id); }
   async taskExists(uuid: string) { this.tick(); return this.autoSync || this.known.has(uuid); }
-  async addTime(a: { issueUuid: string; userId: number; date: string; hours: number }) {
+  async timeFor(_userId: number, date: string): Promise<TimeRecord[]> {
+    this.tick();
+    return [...this.times].filter(([k]) => k.endsWith(`|${date}`)).map(([k, h]) => ({ task: `li:${k.split('|')[0]}`, seconds: Math.round(h * 3600) }));
+  }
+  async postTime(a: AddTime) {
     this.tick();
     this.posts++;
-    this.times.set(`${a.issueUuid}|${a.date}`, a.hours);
+    const key = `${a.issueUuid}|${a.date}`;
+    this.times.set(key, (this.times.get(key) ?? 0) + a.hours);
+    if (this.loseResponseEvery && this.posts % this.loseResponseEvery === 0) throw new Error('socket hang up');
   }
+  addTime(a: AddTime) { return logTimeOnce(this, a); }
   async userSeconds() { return 0; }
 }
