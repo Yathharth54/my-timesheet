@@ -62,17 +62,24 @@ export function createServer(deps: ServerDeps = {}): http.Server {
   const current = (week: string): Draft => loadDraft(week) ?? emptyDraft(week);
   const respond = (d: Draft) => ({ draft: d, warnings: validate(d, projectNames()) });
   const commit = (d: Draft) => respond(saveDraft(syncParents(d)));
+  const assertNotPushing = (week: string) => {
+    if (pushStates.get(week)?.status === 'running') throw new ApiError(423, 'A push is running for this week. Wait for it to finish.');
+  };
   const wrap = <T>(fn: () => T): T => { try { return fn(); } catch (e) { throw e instanceof ApiError ? e : new ApiError(400, (e as Error).message); } };
 
   function putDraft(incoming: Draft) {
     if (!incoming?.week) throw new ApiError(400, 'Missing draft');
     const cur = current(incoming.week);
     if (incoming.rev !== cur.rev) throw new ApiError(409, 'The draft changed elsewhere. Reloaded.', { draft: cur });
+    assertNotPushing(incoming.week);
+    incoming.pushed = cur.pushed;
+    incoming.weightsSource = cur.weightsSource;
     const before = new Map(cur.items.map(i => [i.id, i]));
     incoming.items = incoming.items.map(i => {
       const old = before.get(i.id);
       if (!old) return i;
       if (old.linear?.created) return old;
+      if (old.linear) i.linear = old.linear;
       if (old.project !== i.project) appendLine(paths.examples(), { kind: 'bucket', title: i.title, description: i.description, from: old.project, to: i.project, at: new Date().toISOString() });
       if (old.title !== i.title || old.description !== i.description) {
         appendLine(paths.examples(), { kind: 'rewrite', before: { title: old.title, description: old.description }, after: { title: i.title, description: i.description }, at: new Date().toISOString() });
@@ -80,11 +87,18 @@ export function createServer(deps: ServerDeps = {}): http.Server {
       }
       return i;
     });
+    const have = new Set(incoming.items.map(i => i.id));
+    for (const old of cur.items) if (old.linear?.created && !have.has(old.id)) incoming.items.push(old);
     for (const p of incoming.parents) {
       const old = cur.parents.find(x => x.key === p.key);
       if (old?.linear?.created) Object.assign(p, old);
-      else if (old && (old.title !== p.title || old.description !== p.description)) p.edited = true;
+      else if (old) {
+        if (old.linear) p.linear = old.linear;
+        if (old.title !== p.title || old.description !== p.description) p.edited = true;
+      }
     }
+    const haveP = new Set(incoming.parents.map(p => p.key));
+    for (const old of cur.parents) if (old.linear?.created && !haveP.has(old.key)) incoming.parents.push(old);
     return commit(incoming);
   }
 
@@ -124,6 +138,11 @@ export function createServer(deps: ServerDeps = {}): http.Server {
       const port = (server.address() as { port: number }).port;
       const host = (req.headers.host ?? '').toLowerCase();
       if (host !== `127.0.0.1:${port}` && host !== `localhost:${port}`) return send(res, 403, { error: 'Forbidden host' });
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        const origin = req.headers.origin;
+        if (origin !== undefined && origin !== `http://127.0.0.1:${port}` && origin !== `http://localhost:${port}`) return send(res, 403, { error: 'Forbidden origin' });
+        if (!(req.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) return send(res, 415, { error: 'Expected application/json' });
+      }
       const url = new URL(req.url ?? '/', 'http://local');
       if (req.method === 'GET' && STATIC[url.pathname]) {
         const [file, type] = STATIC[url.pathname];
@@ -147,24 +166,26 @@ export function createServer(deps: ServerDeps = {}): http.Server {
         case 'POST /api/distribute': {
           const b = await readBody(req);
           const w = resolveWeek(b.week, now());
+          assertNotPushing(w);
           const evidence = readJson<WeekEvidence>(paths.evidence(w), { commits: {}, sessions: {} });
           let out: Draft;
           try { out = await runDistribute(current(w), { reweight: !!b.reweight }, { run, evidence }); } catch (e) { throw new ApiError(400, (e as Error).message); }
           return send(res, 200, commit(out));
         }
-        case 'POST /api/hours': { const b = await readBody(req); return send(res, 200, wrap(() => commit(setHours(current(resolveWeek(b.week, now())), b.id, Number(b.hours))))); }
-        case 'POST /api/items': { const b = await readBody(req); return send(res, 200, wrap(() => commit(addManualItem(current(resolveWeek(b.week, now())), b)))); }
-        case 'POST /api/delete': { const b = await readBody(req); return send(res, 200, wrap(() => commit(deleteItem(current(resolveWeek(b.week, now())), b.id)))); }
+        case 'POST /api/hours': { const b = await readBody(req); return send(res, 200, wrap(() => { assertNotPushing(resolveWeek(b.week, now())); return commit(setHours(current(resolveWeek(b.week, now())), b.id, Number(b.hours))); })); }
+        case 'POST /api/items': { const b = await readBody(req); return send(res, 200, wrap(() => { assertNotPushing(resolveWeek(b.week, now())); return commit(addManualItem(current(resolveWeek(b.week, now())), b)); })); }
+        case 'POST /api/delete': { const b = await readBody(req); return send(res, 200, wrap(() => { assertNotPushing(resolveWeek(b.week, now())); return commit(deleteItem(current(resolveWeek(b.week, now())), b.id)); })); }
         case 'POST /api/split': {
           const b = await readBody(req);
           return send(res, 200, wrap(() => {
+            assertNotPushing(resolveWeek(b.week, now()));
             const d = current(resolveWeek(b.week, now()));
             const item = d.items.find(i => i.id === b.id);
             if (!item) throw new Error(`No item ${b.id}.`);
             return commit(splitItem(d, b.id, mechanicalSplit(item, Math.max(2, Number(b.parts) || 2))));
           }));
         }
-        case 'POST /api/merge': { const b = await readBody(req); return send(res, 200, wrap(() => commit(mergeItems(current(resolveWeek(b.week, now())), b.ids)))); }
+        case 'POST /api/merge': { const b = await readBody(req); return send(res, 200, wrap(() => { assertNotPushing(resolveWeek(b.week, now())); return commit(mergeItems(current(resolveWeek(b.week, now())), b.ids)); })); }
         case 'GET /api/everhour': return send(res, 200, { hours: await everhourHours(week) });
         case 'GET /api/history': return send(res, 200, listWeeks().map(w => {
           const d = loadDraft(w)!;

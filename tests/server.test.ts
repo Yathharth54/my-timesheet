@@ -98,4 +98,65 @@ describe('review server', () => {
     await waitFor('done');
     expect(loadDraft(W)!.pushed).toBe(true);
   });
+
+  const raw = (method: string, p: string, headers: Record<string, string>, body?: string) =>
+    fetch(srv.url + p, { method, headers, body }).then(async r => ({ status: r.status, json: await r.json() }));
+
+  it('rejects non-JSON content types and foreign origins on writes', async () => {
+    const t = await raw('POST', '/api/push', { 'Content-Type': 'text/plain' }, JSON.stringify({ week: W }));
+    expect(t.status).toBe(415);
+    expect((await api('GET', `/api/push?week=${W}`)).json.status).toBe('idle');
+    const o = await raw('POST', '/api/push', { 'Content-Type': 'application/json', Origin: 'https://evil.example' }, JSON.stringify({ week: W }));
+    expect(o.status).toBe(403);
+    expect((await api('GET', `/api/push?week=${W}`)).json.status).toBe('idle');
+    const ok = await raw('POST', '/api/hours', { 'Content-Type': 'application/json', Origin: srv.url }, JSON.stringify({ week: W, id: 'a', hours: 1 }));
+    expect(ok.status).toBe(200);
+  });
+
+  it('keeps pushed items, pre-saved uuids and server-owned fields on PUT', async () => {
+    const d = loadDraft(W)!;
+    d.items[0].linear = { uuid: 'u', identifier: 'T-1', url: null, created: true };
+    d.items[1].linear = { uuid: 'pre', identifier: '', url: null, created: false } as any;
+    saveDraft(d);
+    const { json } = await api('GET', `/api/state?week=${W}`);
+    const inc = json.draft;
+    inc.items = [inc.items[1]];
+    inc.items[0].linear = { uuid: 'changed', identifier: '', url: null, created: false };
+    inc.pushed = true;
+    const r = await api('PUT', '/api/draft', { draft: inc });
+    expect(r.status).toBe(200);
+    const saved = loadDraft(W)!;
+    expect(saved.items.map(i => i.id).sort()).toEqual(['a', 'b']);
+    expect(saved.items.find(i => i.id === 'b')!.linear!.uuid).toBe('pre');
+    expect(saved.pushed).toBe(false);
+  });
+
+  it('returns 423 for edits while a push is running', async () => {
+    let { json } = await api('GET', `/api/state?week=${W}`);
+    json.draft.totalHours = 4;
+    await api('PUT', '/api/draft', { draft: json.draft });
+    await api('POST', '/api/distribute', { week: W, reweight: false });
+    let release!: () => void;
+    const gate = new Promise<void>(r => { release = r; });
+    class GatedLinear extends FakeLinear {
+      override async createIssue(input: Parameters<FakeLinear['createIssue']>[0]) { await gate; return super.createIssue(input); }
+    }
+    const linear = new GatedLinear();
+    const gated = await startServer(0, { run: async () => '[]', clients: () => ({ linear, everhour }), now: () => new Date('2026-10-06T10:00:00Z') });
+    const g = async (method: string, p: string, body?: unknown) => {
+      const r = await fetch(gated.url + p, { method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+      return { status: r.status, json: await r.json() };
+    };
+    try {
+      expect((await g('POST', '/api/push', { week: W })).status).toBe(202);
+      const s = (await g('GET', `/api/state?week=${W}`)).json;
+      expect((await g('PUT', '/api/draft', { draft: s.draft })).status).toBe(423);
+      expect((await g('POST', '/api/hours', { week: W, id: 'a', hours: 1 })).status).toBe(423);
+      expect((await g('POST', '/api/delete', { week: W, id: 'a' })).status).toBe(423);
+    } finally {
+      release();
+      for (let i = 0; i < 100 && (await g('GET', `/api/push?week=${W}`)).json.status === 'running'; i++) await new Promise(r => setTimeout(r, 20));
+      await gated.close();
+    }
+  });
 });
