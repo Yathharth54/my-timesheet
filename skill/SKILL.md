@@ -34,7 +34,7 @@ You turn one week of work evidence into timesheet items. **You never decide hour
      ]
    }
    ```
-4. Run `timesheet ingest --week <same week>`. Relay its one-line summary. Then tell the user to run `/timesheet review` to edit the items, set the total and push.
+4. Run `timesheet ingest --week <same week>`. Relay its one-line summary. Then tell the user to run `/timesheet review <the same week>` (e.g. `/timesheet review last`, or `/timesheet review 2026-W40`; plain `/timesheet review` for this week) to edit the items, set the total and push.
 
 ## What an item is
 
