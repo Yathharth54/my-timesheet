@@ -25,6 +25,16 @@ describe('gitCommits', () => {
     expect(cs[0]).toMatchObject({ repo: 'TheAgenticAI/demo', day: '2026-10-06', subject: 'add a.txt', files: ['a.txt'], insertions: 3, deletions: 0 });
   });
 
+  it('matches author emails exactly (case-insensitive), not by regex', () => {
+    const repo = tmpDir();
+    execFileSync('git', ['-C', repo, 'init', '-q', '-b', 'main']);
+    commit(repo, 'someme@x.ai.uk', '2026-10-06T10:00:00Z', 'wrong.txt', 1);
+    commit(repo, 'ME@x.ai', '2026-10-06T11:00:00Z', 'correct.txt', 1);
+    const cs = gitCommits(repo, 'TheAgenticAI/demo', ['me@x.ai'], new Date('2026-10-05T00:00:00Z'), new Date('2026-10-12T00:00:00Z'));
+    expect(cs).toHaveLength(1);
+    expect(cs[0].subject).toBe('add correct.txt');
+  });
+
   it('returns [] for a non-repo or no authors', () => {
     expect(gitCommits(tmpDir(), 'x', ['me@x.ai'], new Date(0), new Date())).toEqual([]);
     expect(gitCommits(tmpDir(), 'x', [], new Date(0), new Date())).toEqual([]);

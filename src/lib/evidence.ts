@@ -4,11 +4,11 @@ import type { Commit, Item, WeekEvidence } from './types.js';
 
 export function gitCommits(root: string, repo: string, authors: string[], from: Date, to: Date): Commit[] {
   if (!authors.length) return [];
+  const authorLower = authors.map(a => a.toLowerCase());
   const args = [
     '-C', root, 'log', '--all', '--no-merges',
     `--since=${from.toISOString()}`, `--until=${to.toISOString()}`,
-    ...authors.map(a => `--author=${a}`),
-    '--format=%x1e%H%x1f%aI%x1f%s', '--numstat',
+    '--format=%x1e%H%x1f%aI%x1f%ae%x1f%s', '--numstat', '--no-renames',
   ];
   let out: string;
   try {
@@ -21,8 +21,9 @@ export function gitCommits(root: string, repo: string, authors: string[], from: 
   for (const rec of out.split('\x1e')) {
     if (!rec.trim()) continue;
     const [header, ...rest] = rec.split('\n');
-    const [sha, at, subject] = header.split('\x1f');
+    const [sha, at, ae, subject] = header.split('\x1f');
     if (!sha || seen.has(sha)) continue;
+    if (!authorLower.includes(ae.toLowerCase())) continue;
     seen.add(sha);
     const when = new Date(at);
     if (when < from || when >= to) continue;
