@@ -99,6 +99,28 @@ describe('review server', () => {
     expect(loadDraft(W)!.pushed).toBe(true);
   });
 
+  it('asks for confirmation when Everhour already has hours for the week, then pushes with confirm', async () => {
+    let { json } = await api('GET', `/api/state?week=${W}`);
+    json.draft.totalHours = 4;
+    await api('PUT', '/api/draft', { draft: json.draft });
+    await api('POST', '/api/distribute', { week: W, reweight: false });
+    everhour.userSeconds = async () => 2 * 3600;
+    const r = await api('POST', '/api/push', { week: W });
+    expect(r.status).toBe(409);
+    expect(r.json).toMatchObject({ needsConfirm: true, hours: 2 });
+    expect((await api('GET', `/api/push?week=${W}`)).json.status).toBe('idle');
+    expect((await api('POST', '/api/push', { week: W, confirm: true })).status).toBe(202);
+    for (let i = 0; i < 50 && (await api('GET', `/api/push?week=${W}`)).json.status === 'running'; i++) await new Promise(r => setTimeout(r, 20));
+    expect(loadDraft(W)!.pushed).toBe(true);
+  });
+
+  it('requires confirmation when the Everhour total cannot be read', async () => {
+    everhour.userSeconds = async () => { throw new Error('HTTP 502'); };
+    const r = await api('POST', '/api/push', { week: W });
+    expect(r.status).toBe(409);
+    expect(r.json).toMatchObject({ needsConfirm: true, hours: null });
+  });
+
   const raw = (method: string, p: string, headers: Record<string, string>, body?: string) =>
     fetch(srv.url + p, { method, headers, body }).then(async r => ({ status: r.status, json: await r.json() }));
 

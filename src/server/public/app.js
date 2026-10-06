@@ -7,7 +7,7 @@ const dayName = d => WEEKDAY[new Date(`${d}T12:00:00`).getDay()];
 const state = {
   week: new URLSearchParams(location.search).get('week'),
   draft: null, base: null, weeks: [], projects: [], warnings: [], push: { status: 'idle' },
-  tab: 'week', focus: 0, editing: null, mergeFrom: null, armedDelete: null, everhour: null, saving: false, flash: '',
+  tab: 'week', focus: 0, editing: null, confirm: null, mergeFrom: null, armedDelete: null, everhour: null, saving: false, flash: '',
 };
 
 async function api(method, url, body) {
@@ -171,6 +171,7 @@ function renderStatus() {
 function renderPush() {
   const p = state.push;
   const el = $('#pushpanel');
+  if (state.confirm) { el.hidden = false; el.innerHTML = `? ${esc(state.confirm.text)} <span class="dim">(y/n)</span>`; return; }
   if (!p || p.status === 'idle') { el.hidden = true; return; }
   el.hidden = false;
   const lines = {
@@ -181,7 +182,7 @@ function renderPush() {
     error: `✗ ${esc(p.error)} <button id="continue">retry</button>`,
   };
   el.innerHTML = lines[p.status] ?? '';
-  $('#continue')?.addEventListener('click', startPush);
+  $('#continue')?.addEventListener('click', requestPush);
 }
 
 function render() {
@@ -193,9 +194,26 @@ function render() {
   renderPush();
 }
 
-async function startPush() {
+/** Shows an inline (y/n) question in the push panel; y runs yes(). */
+function ask(text, yes) { state.confirm = { text, yes }; renderPush(); }
+
+/** P, the palette's push, and the continue/retry buttons. Continuing after awaiting_sync needs no extra confirm. */
+function requestPush() {
+  if (state.push?.status === 'awaiting_sync') return startPush(true);
+  const week = state.week;
+  ask(`push ${week} to Linear + Everhour?`, () => startPush(false));
+}
+
+async function startPush(confirm) {
   await save();
-  try { await api('POST', '/api/push', { week: state.week }); } catch (e) { return flash(e.message); }
+  const week = state.week;
+  try { await api('POST', '/api/push', { week, confirm }); } catch (e) {
+    if (e.status === 409 && e.body?.needsConfirm) {
+      const h = e.body.hours;
+      return ask(h == null ? `couldn't read Everhour for ${week}. push anyway?` : `Everhour already has ${h.toFixed(1)}h for ${week}. push anyway?`, () => startPush(true));
+    }
+    return flash(e.message);
+  }
   const poll = async () => {
     state.push = await api('GET', `/api/push?week=${state.week}`);
     renderPush();
@@ -232,6 +250,15 @@ document.addEventListener('keydown', e => {
     return;
   }
   if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (state.confirm && !['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) {
+    if (e.key !== 'y' && e.key !== 'n' && e.key !== 'Escape') return;
+    e.preventDefault();
+    const c = state.confirm;
+    state.confirm = null;
+    renderPush();
+    if (e.key === 'y') c.yes(); else flash('push cancelled');
+    return;
+  }
   if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) {
     if (e.key === 'Escape') { e.target.blur(); $('#palette').hidden = true; }
     return;
@@ -251,7 +278,7 @@ document.addEventListener('keydown', e => {
   else if (k === 's' && it && !it.linear) return act('/api/split', { id: it.id, parts: 2 });
   else if (k === 'a') { e.preventDefault(); return addItem(); }
   else if (k === 'D') return act('/api/distribute', { reweight: false });
-  else if (k === 'P') return startPush();
+  else if (k === 'P') return requestPush();
   else if (k === '/') { e.preventDefault(); $('#palette').hidden = false; $('#paletteinput').value = ''; return $('#paletteinput').focus(); }
   else if (k === '?') { const h = $('#help'); h.hidden = !h.hidden; h.innerHTML = HELP.map(([a, b]) => `<div><span class="key">${a}</span> ${b}</div>`).join(''); return; }
   else return;
@@ -262,9 +289,10 @@ $('#paletteinput').addEventListener('keydown', e => {
   if (e.key !== 'Enter') return;
   const [cmd, arg] = e.target.value.trim().split(/\s+/);
   $('#palette').hidden = true;
+  e.target.blur();
   if (cmd === 'distribute') act('/api/distribute', { reweight: false });
   else if (cmd === 'reweight') act('/api/distribute', { reweight: true });
-  else if (cmd === 'push') startPush();
+  else if (cmd === 'push') requestPush();
   else if (cmd === 'week' && arg) load(arg);
   else if (cmd === 'settings' || cmd === 'history' || cmd === 'week') { state.tab = cmd === 'week' ? 'week' : cmd; render(); }
 });

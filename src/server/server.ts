@@ -216,7 +216,16 @@ export function createServer(deps: ServerDeps = {}): http.Server {
           }
           return send(res, 200, { ok: true });
         }
-        case 'POST /api/push': { const b = await readBody(req); startPush(resolveWeek(b.week, now())); return send(res, 202, { started: true }); }
+        case 'POST /api/push': {
+          const b = await readBody(req);
+          const w = resolveWeek(b.week, now());
+          if (b.confirm !== true && !loadDraft(w)?.pushed) {
+            const hours = await everhourHours(w);
+            if (hours === null || hours > 0) throw new ApiError(409, hours === null ? "Couldn't read this week's Everhour total. Confirm to push anyway." : `Everhour already has ${hours}h for ${w}. Confirm to push anyway.`, { needsConfirm: true, hours });
+          }
+          startPush(w);
+          return send(res, 202, { started: true });
+        }
         case 'GET /api/push': return send(res, 200, pushStates.get(week) ?? { status: 'idle' });
         default: return send(res, 404, { error: 'Not found' });
       }
