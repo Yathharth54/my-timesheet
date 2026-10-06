@@ -1,5 +1,6 @@
 const $ = (s, el = document) => el.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const linearLink = l => /^https?:\/\//i.test(l?.url ?? '') ? `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.identifier)}</a>` : esc(l?.identifier);
 const WEEKDAY = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const dayName = d => WEEKDAY[new Date(`${d}T12:00:00`).getDay()];
 
@@ -58,17 +59,20 @@ async function save() {
   if (!pending.items.length && !Object.keys(pending.top).length) return;
   state.saving = true; renderStatus();
   try {
-    accept(await api('PUT', '/api/draft', { draft: state.draft }));
-  } catch (e) {
-    if (e.status === 409) {
-      const fresh = e.body.draft;
+    try {
+      accept(await api('PUT', '/api/draft', { draft: state.draft }));
+    } catch (e) {
+      const server = e.body?.draft;
+      if (e.status !== 409 || !server) throw e;
+      const fresh = structuredClone(server);
       for (const [id, patch] of pending.items) { const it = fresh.items.find(x => x.id === id); if (it && !it.linear?.created) Object.assign(it, patch); }
       Object.assign(fresh, pending.top);
-      state.base = structuredClone(e.body.draft);
+      state.base = structuredClone(server);
       state.draft = fresh;
       flash('draft changed elsewhere, your edits were re-applied');
-      return save();
+      accept(await api('PUT', '/api/draft', { draft: state.draft })); // one retry only; state.saving stays true
     }
+  } catch (e) {
     flash(e.message);
   } finally { state.saving = false; renderStatus(); }
 }
@@ -101,9 +105,9 @@ function renderHeader() {
   $('#weeklabel').textContent = state.week;
   $('#total').value = state.draft.totalHours ?? '';
   const all = (() => { const [y, w] = state.week.split('-W').map(Number); const j4 = new Date(Date.UTC(y, 0, 4)); const mon = new Date(j4); mon.setUTCDate(j4.getUTCDate() - ((j4.getUTCDay() + 6) % 7) + (w - 1) * 7); return Array.from({ length: 7 }, (_, i) => { const d = new Date(mon); d.setUTCDate(mon.getUTCDate() + i); return d.toISOString().slice(0, 10); }); })();
-  $('#days').innerHTML = all.map(d => `<button class="day ${state.draft.days.includes(d) ? 'on' : ''}" data-day="${d}">${dayName(d)[0]}</button>`).join('');
+  $('#days').innerHTML = all.map(d => `<button class="day ${state.draft.days.includes(d) ? 'on' : ''}" data-day="${esc(d)}">${dayName(d)[0]}</button>`).join('');
   $('#everhour').textContent = state.everhour == null ? '' : `already in everhour: ${state.everhour.toFixed(1)}h`;
-  $('#warnings').innerHTML = state.warnings.map(w => `<div class="warn ${w.level}">${w.level === 'block' ? '✗' : '!'} ${esc(w.message)}</div>`).join('');
+  $('#warnings').innerHTML = state.warnings.map(w => `<div class="warn ${esc(w.level)}">${w.level === 'block' ? '✗' : '!'} ${esc(w.message)}</div>`).join('');
   document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === state.tab));
 }
 
@@ -111,19 +115,19 @@ function renderWeek() {
   const fid = focused()?.id;
   const loadByDay = d => live().filter(i => i.day === d).reduce((s, i) => s + (i.hours ?? 0), 0);
   $('#view').innerHTML = rows().map(r => {
-    if (r.kind === 'day') return `<div class="row day" data-dropday="${r.day}">▾ ${r.day === 'not counted' ? 'NOT COUNTED' : `${dayName(r.day).toUpperCase()} ${r.day}`}<span class="num">${r.day === 'not counted' ? '' : loadByDay(r.day).toFixed(1) + 'h'}</span></div>`;
-    if (r.kind === 'parent') return `<div class="row parent">├─ <span class="proj">${esc(r.project || 'unassigned')}</span> <span class="ptitle" data-parent="${esc(r.parent?.key ?? '')}">${esc(r.parent?.title ?? '')}</span>${r.parent?.linear?.created ? ` <a href="${esc(r.parent.linear.url)}" target="_blank">${esc(r.parent.linear.identifier)}</a>` : ''}</div>`;
+    if (r.kind === 'day') return `<div class="row day" data-dropday="${esc(r.day)}">▾ ${r.day === 'not counted' ? 'NOT COUNTED' : `${dayName(r.day).toUpperCase()} ${esc(r.day)}`}<span class="num">${r.day === 'not counted' ? '' : loadByDay(r.day).toFixed(1) + 'h'}</span></div>`;
+    if (r.kind === 'parent') return `<div class="row parent">├─ <span class="proj">${esc(r.project || 'unassigned')}</span> <span class="ptitle" data-parent="${esc(r.parent?.key ?? '')}">${esc(r.parent?.title ?? '')}</span>${r.parent?.linear?.created ? ` ${linearLink(r.parent.linear)}` : ''}</div>`;
     const i = r.item;
     const pushed = !!i.linear?.created;
     const editing = state.editing === i.id;
     const cls = ['row', 'item', i.id === fid ? 'focus' : '', pushed ? 'pushed' : '', state.mergeFrom === i.id ? 'marked' : ''].join(' ');
-    return `<div class="${cls}" data-id="${i.id}" draggable="${!pushed}">
+    return `<div class="${cls}" data-id="${esc(i.id)}" draggable="${!pushed}">
       <div class="line">│  ${i.id === fid ? '<span class="cursor">█</span>' : ' '} ${editing ? `<input class="edit-title" value="${esc(i.title)}">` : `<span class="title">${esc(i.title)}</span>`}
         <span class="proj">[${esc(i.project ?? '—')}]</span>
         <span class="num">${i.hours == null ? '  —' : i.hours.toFixed(1)}h</span>${i.locked ? '<span class="lock" title="locked">L</span>' : ''}
-        ${pushed ? `<a href="${esc(i.linear.url)}" target="_blank">${esc(i.linear.identifier)}</a>` : ''}</div>
+        ${pushed ? linearLink(i.linear) : ''}</div>
       ${editing ? `<textarea class="edit-desc" rows="3">${esc(i.description)}</textarea>` : `<div class="desc dim">${esc(i.description)}</div>`}
-      <div class="why dim">${esc(i.bucketReason)}${i.weightReason ? ` · weight ${i.weight}: ${esc(i.weightReason)}` : ''}${i.evidence.manual ? ' · added by hand' : ` · ${i.evidence.commits.length} commits, ${i.evidence.sessions.length} sessions`}</div>
+      <div class="why dim">${esc(i.bucketReason)}${i.weightReason ? ` · weight ${esc(i.weight)}: ${esc(i.weightReason)}` : ''}${i.evidence.manual ? ' · added by hand' : ` · ${i.evidence.commits.length} commits, ${i.evidence.sessions.length} sessions`}</div>
     </div>`;
   }).join('') + `<div class="row add">+ add item <span class="dim">(a)</span></div>`;
   if (state.editing) $('.edit-title')?.focus();
@@ -150,7 +154,7 @@ async function renderSettings() {
 
 async function renderHistory() {
   const h = await api('GET', '/api/history');
-  $('#view').innerHTML = h.map(w => `<div class="row hist" data-week="${w.week}">${w.week}<span class="num">${w.total.toFixed(1)}h</span> <span class="dim">${w.items} items · ${w.pushed ? 'pushed' : 'not pushed'}</span></div>`).join('') || '<div class="dim">no weeks yet</div>';
+  $('#view').innerHTML = h.map(w => `<div class="row hist" data-week="${esc(w.week)}">${esc(w.week)}<span class="num">${w.total.toFixed(1)}h</span> <span class="dim">${w.items} items · ${w.pushed ? 'pushed' : 'not pushed'}</span></div>`).join('') || '<div class="dim">no weeks yet</div>';
 }
 
 function renderStatus() {
@@ -212,7 +216,7 @@ function addItem() {
   const day = focused()?.day ?? state.draft.days[0];
   const row = document.createElement('div');
   row.className = 'row additem';
-  row.innerHTML = `<input id="newtitle" placeholder="title (2–3 words)"> <input id="newdesc" placeholder="description"> <select id="newproj">${state.projects.map(p => `<option>${esc(p.name)}</option>`).join('')}</select> <select id="newday">${state.draft.days.map(d => `<option ${d === day ? 'selected' : ''}>${d}</option>`).join('')}</select> <button id="newok" class="accent">add</button>`;
+  row.innerHTML = `<input id="newtitle" placeholder="title (2–3 words)"> <input id="newdesc" placeholder="description"> <select id="newproj">${state.projects.map(p => `<option>${esc(p.name)}</option>`).join('')}</select> <select id="newday">${state.draft.days.map(d => `<option ${d === day ? 'selected' : ''}>${esc(d)}</option>`).join('')}</select> <button id="newok" class="accent">add</button>`;
   $('#view').appendChild(row);
   $('#newtitle').focus();
   $('#newok').onclick = () => act('/api/items', { title: $('#newtitle').value, description: $('#newdesc').value, project: $('#newproj').value, day: $('#newday').value });
@@ -227,6 +231,7 @@ document.addEventListener('keydown', e => {
     if (e.key === 'Enter' && e.metaKey) { e.preventDefault(); commitEdit(); }
     return;
   }
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) {
     if (e.key === 'Escape') { e.target.blur(); $('#palette').hidden = true; }
     return;
