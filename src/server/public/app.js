@@ -573,7 +573,12 @@ async function startPush(confirm) {
   state.print.starting = true; render();
   try {
     if (!(await save())) return toast(`Your edits aren't saved (${state.saveError ?? 'unknown error'}), so printing didn't start.`);
-    const week = state.week;
+    // Push the week the prompt named, never whatever week is on screen now.
+    const week = state.print?.week;
+    if (!week || week !== state.week) {
+      state.print = null;
+      return toast(`You switched weeks, so nothing was printed. Open week ${week ? weekNo(week) : ''} and press Print again.`);
+    }
     try {
       await api('POST', '/api/push', { week, confirm });
     } catch (e) {
