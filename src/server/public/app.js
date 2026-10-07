@@ -39,7 +39,7 @@ const state = {
   tab: 'week', sel: null, mergeFrom: null, armedDelete: null, collapsed: new Set(), flash: new Set(), fed: false,
   adding: false, addProject: null, addDay: null,
   everhour: undefined, // undefined: still asking, null: couldn't read, number: hours
-  saving: false, busy: null, toast: '', help: false, palette: false,
+  saving: false, saveFailed: false, saveError: null, busy: null, toast: '', help: false, palette: false,
   openSel: null, selActive: 0,
   print: null, settings: null, settingsSaving: false, history: null, loadError: null,
 };
@@ -153,13 +153,37 @@ function acceptCarrying(res, sent) {
 }
 const hasPending = () => { if (!state.draft) return false; const p = pendingPatches(); return p.items.length > 0 || Object.keys(p.top).length > 0; };
 
-let saveTimer = null;
-function scheduleSave() { clearTimeout(saveTimer); saveTimer = setTimeout(save, 400); renderTop(); }
+let saveTimer = null, retryTimer = null, inflight = null;
+function scheduleSave(ms = 400) { clearTimeout(saveTimer); saveTimer = setTimeout(save, ms); renderTop(); }
 
-async function save() {
+/**
+ * Saves pending edits. Only one save runs at a time: a call made while one is in flight gets the same promise,
+ * and the running save goes round again (at most twice more) if edits are still pending when its PUT returns.
+ * Resolves true when everything is saved. A failure leaves the edits pending, shows "Unsaved" and retries in ~2 s
+ * (a 423 keeps retrying quietly until the push finishes).
+ */
+function save() {
   clearTimeout(saveTimer);
-  const pending = pendingPatches();
-  if (!pending.items.length && !Object.keys(pending.top).length) return;
+  clearTimeout(retryTimer);
+  if (inflight) return inflight;
+  inflight = (async () => {
+    let ok = true;
+    try {
+      for (let round = 0; ok && hasPending() && round < 3; round++) ok = await saveOnce();
+    } finally {
+      inflight = null;
+      state.saving = false;
+    }
+    state.saveFailed = !ok;
+    if (!ok) retryTimer = setTimeout(save, 2000);
+    renderTop();
+    return ok;
+  })();
+  return inflight;
+}
+
+/** One PUT /api/draft, with the single re-apply-and-retry on 409. Returns false on failure. */
+async function saveOnce() {
   state.saving = true; renderTop();
   try {
     let sent = structuredClone(state.draft);
@@ -175,14 +199,19 @@ async function save() {
       sent = structuredClone(fresh);
       acceptCarrying(await api('PUT', '/api/draft', { draft: sent }), sent); // one retry only; state.saving stays true
     }
+    state.saveError = null;
+    return true;
   } catch (e) {
-    toast(e.message); // a 423 (push running) just shows its message
-  } finally { state.saving = false; renderTop(); }
+    // say it once; the automatic retries stay quiet unless the reason changes (a 423 just shows its message)
+    if (!state.saveFailed || state.saveError !== e.message) toast(e.status === 423 ? e.message : `Not saved: ${e.message} Retrying.`);
+    state.saveError = e.message;
+    return false;
+  }
 }
 
-/** POSTs an edit for this week. Returns the new draft on success, null on failure. */
+/** POSTs an edit for this week after pending edits are saved. Returns the new draft on success, null on failure. */
 async function act(url, body) {
-  await save();
+  if (!(await save())) return null; // posting now would drop the unsaved edits
   const sent = structuredClone(state.draft);
   try {
     const res = await api('POST', url, { week: state.week, ...body });
@@ -306,7 +335,8 @@ function render() {
 }
 
 function renderTop() {
-  const busy = state.saving || state.settingsSaving || hasPending();
+  const failed = state.saveFailed && hasPending() && !state.saving;
+  const busy = !failed && (state.saving || state.settingsSaving || hasPending());
   const onWeek = state.tab === 'week' && !state.print;
   $('#top').innerHTML = `<div class="top-in">
     <span class="brand">my-timesheet</span>
@@ -317,7 +347,7 @@ function renderTop() {
       <span class="weeklabel" title="${esc(state.week)}">Week ${weekNo(state.week)}</span>
       <button class="icon-btn" data-act="next" aria-label="Next week">${NEXT}</button>
     </div>` : ''}
-    <span class="saved ${busy ? 'busy' : ''}" aria-live="polite">${busy ? 'Saving' : 'Saved'}</span>
+    <span class="saved ${failed ? 'failed' : busy ? 'busy' : ''}" aria-live="polite" ${failed ? `title="${esc(state.saveError ?? '')}"` : ''}>${failed ? 'Unsaved' : busy ? 'Saving' : 'Saved'}</span>
   </div>`;
 }
 function renderToast() { $('#toast').innerHTML = state.toast ? `<div class="toast" role="status">${esc(state.toast)}</div>` : ''; }
@@ -373,7 +403,7 @@ function renderSetup() {
       </div>
       <div>
         <span class="label">Days that count</span>
-        <div class="days">${all7.map(x => `<button class="day-btn ${d.days.includes(x) ? 'on' : ''}" data-act="day" data-d="${x}" aria-pressed="${d.days.includes(x)}" aria-label="${dname(x)}">${dname(x)[0]}</button>`).join('')}</div>
+        <div class="days">${all7.map(x => `<button class="day-btn ${d.days.includes(x) ? 'on' : ''}" data-act="day" data-d="${esc(x)}" aria-pressed="${d.days.includes(x)}" aria-label="${dname(x)}">${dname(x)[0]}</button>`).join('')}</div>
       </div>
       <div class="divider"></div>
       <div class="muted" style="font-size:14px">${eh}</div>
@@ -433,7 +463,7 @@ function renderReceipt(feed) {
 
 function renderDay(day) {
   const open = !state.collapsed.has(day.day);
-  const head = `<button class="r-dayhead" data-act="collapse" data-d="${day.day}" ${day.counted ? `data-dropday="${day.day}"` : ''} aria-expanded="${open}"><span><span class="chev">▾</span>${dname(day.day)}${day.counted ? '' : ' (not counted)'}<span class="meta">${plural(day.count, 'line')}</span></span><span>${fmt(day.total)}</span></button>`;
+  const head = `<button class="r-dayhead" data-act="collapse" data-d="${esc(day.day)}" ${day.counted ? `data-dropday="${esc(day.day)}"` : ''} aria-expanded="${open}"><span><span class="chev">▾</span>${dname(day.day)}${day.counted ? '' : ' (not counted)'}<span class="meta">${plural(day.count, 'line')}</span></span><span>${fmt(day.total)}</span></button>`;
   if (!open) return `<div class="r-day">${head}</div>`;
   return `<div class="r-day">${head}${day.groups.map(g => {
     const parent = g.key ? state.draft.parents.find(p => p.key === `${day.day}|${g.key}`) : null;
@@ -535,20 +565,40 @@ function requestPush() {
   render();
 }
 
+let starting = false;
 async function startPush(confirm) {
-  await save();
-  const week = state.week;
+  if (starting) return; // a second click or key press while the first start is on its way
+  starting = true;
   state.print ??= newPrint(state.draft, 'server');
+  state.print.starting = true; render();
   try {
-    await api('POST', '/api/push', { week, confirm });
-  } catch (e) {
-    if (e.status === 409 && e.body?.needsConfirm) { state.print.stage = 'everhour'; state.print.ehHours = e.body.hours; return render(); }
-    return toast(e.message); // 423 and the rest: just say why
+    if (!(await save())) return toast(`Your edits aren't saved (${state.saveError ?? 'unknown error'}), so printing didn't start.`);
+    const week = state.week;
+    try {
+      await api('POST', '/api/push', { week, confirm });
+    } catch (e) {
+      if (e.status === 409 && e.body?.needsConfirm && state.print) { state.print.stage = 'everhour'; state.print.ehHours = e.body.hours; return; }
+      return toast(e.message); // 423 and the rest: just say why
+    }
+    if (!state.print) return;
+    state.print.stage = 'server';
+    state.push = { status: 'running', phase: 'parents', done: 0, total: 0 };
+    pollPush();
+  } finally {
+    starting = false;
+    if (state.print) state.print.starting = false;
+    render();
   }
-  state.print.stage = 'server';
-  state.push = { status: 'running', phase: 'parents', done: 0, total: 0 };
-  render();
-  pollPush();
+}
+
+/** GET /api/push, retried with backoff (0.4, 0.8, 1.6, 3.2 s) before giving up. */
+async function fetchPush(week) {
+  for (let attempt = 0; ; attempt++) {
+    try { return await api('GET', `/api/push?week=${week}`); } catch (e) {
+      if (attempt >= 4) throw e;
+      await sleep(400 * 2 ** attempt);
+    }
+  }
 }
 
 let polling = false, refreshing = false;
@@ -558,7 +608,12 @@ async function pollPush() {
   const week = state.week;
   try {
     for (;;) {
-      const p = await api('GET', `/api/push?week=${week}`);
+      let p;
+      try { p = await fetchPush(week); } catch (e) {
+        // lost the server: stop showing "running" so the screen can be closed
+        if (state.week === week) { state.push = { status: 'error', error: `Lost contact with the review server: ${e.message}` }; render(); }
+        return;
+      }
       if (state.week !== week) return;
       const prev = state.push;
       state.push = p;
@@ -609,11 +664,11 @@ function renderPrint() {
     const q = status === 'confirm' ? `Print week ${n}?`
       : pr.ehHours == null ? `Couldn't read Everhour for week ${n}. Print anyway?`
         : `Everhour already has ${fmt(pr.ehHours)} h for you in week ${n}. Print anyway?`;
-    panel = `<div class="callout"><strong style="font-size:17px">${q}</strong><div>Creates ${plural(pr.parents, 'parent issue')} and ${plural(pr.ids.length, 'sub-issue')} in Linear across ${plural(pr.projects.length, 'project')}, assigned to you and set to Done, then logs ${fmt(pr.hours)} h in Everhour.</div><div class="row"><button class="btn ink" data-act="${status === 'confirm' ? 'print-go' : 'print-anyway'}">${status === 'confirm' ? 'Print' : 'Print anyway'} <span class="kbd">y</span></button><button class="btn" data-act="print-cancel">Not now <span class="kbd">n</span></button></div></div>`;
+    panel = `<div class="callout"><strong style="font-size:17px">${q}</strong><div>Creates ${plural(pr.parents, 'parent issue')} and ${plural(pr.ids.length, 'sub-issue')} in Linear across ${plural(pr.projects.length, 'project')}, assigned to you and set to Done, then logs ${fmt(pr.hours)} h in Everhour.</div><div class="row"><button class="btn ink" data-act="${status === 'confirm' ? 'print-go' : 'print-anyway'}" ${pr.starting ? 'disabled' : ''}>${status === 'confirm' ? 'Print' : 'Print anyway'} <span class="kbd">y</span></button><button class="btn" data-act="print-cancel">Not now <span class="kbd">n</span></button></div></div>`;
   } else if (status === 'awaiting_sync') {
-    panel = `<div class="callout"><strong style="font-size:17px">One click in Everhour</strong><div>Everhour can't pull new Linear issues by itself. Open Everhour, go to Projects, and press Sync on each of these:</div><div class="row">${syncProjects.map(projTag).join('')}</div><div class="row"><button class="btn ink" data-act="synced">I pressed Sync, log the hours</button><a class="btn" style="text-decoration:none" href="https://app.everhour.com/" target="_blank" rel="noopener">Open Everhour</a><button class="btn" data-act="print-cancel">Later</button></div></div>`;
+    panel = `<div class="callout"><strong style="font-size:17px">One click in Everhour</strong><div>Everhour can't pull new Linear issues by itself. Open Everhour, go to Projects, and press Sync on each of these:</div><div class="row">${syncProjects.map(projTag).join('')}</div><div class="row"><button class="btn ink" data-act="synced" ${pr.starting ? 'disabled' : ''}>I pressed Sync, log the hours</button><a class="btn" style="text-decoration:none" href="https://app.everhour.com/" target="_blank" rel="noopener">Open Everhour</a><button class="btn" data-act="print-cancel">Later</button></div></div>`;
   } else if (status === 'error') {
-    panel = `<div class="callout bad"><strong>Printing stopped</strong><div>${esc(p.error ?? 'Something went wrong.')}</div><div class="row"><button class="btn" data-act="print-retry">Try again</button><button class="btn" data-act="print-cancel">Back to the week</button></div></div>`;
+    panel = `<div class="callout bad"><strong>Printing stopped</strong><div>${esc(p.error ?? 'Something went wrong.')}</div><div class="row"><button class="btn" data-act="print-retry" ${pr.starting ? 'disabled' : ''}>Try again</button><button class="btn" data-act="print-cancel">Back to the week</button></div></div>`;
   } else if (status === 'done') {
     panel = '<div><button class="btn solid" data-act="print-close">Back to the week</button></div>';
   }
@@ -848,9 +903,11 @@ document.addEventListener('change', e => {
     const v = t.value.trim() === '' ? null : Number(t.value);
     if (v !== null && !(v > 0)) { toast('Hours must be a number above 0.'); t.value = state.draft.totalHours ?? ''; return; }
     state.draft.totalHours = v; scheduleSave(); // no re-render, so a click on Itemise right after typing still lands
-  } else if (t.id === 'ed-title' && it && t.dataset.for === it.id) setField(it, 'title', t.value.trim() || it.title, false);
-  else if (t.id === 'ed-desc' && it && t.dataset.for === it.id) setField(it, 'description', t.value.trim() || it.description, false);
-  else if (t.id === 'orgs' && state.settings) { state.settings.workOrgs = t.value.split(',').map(x => x.trim()).filter(Boolean); saveSettings(); }
+  } else if ((t.id === 'ed-title' || t.id === 'ed-desc') && it && t.dataset.for === it.id) {
+    const field = t.id === 'ed-title' ? 'title' : 'description';
+    if (!t.value.trim()) { t.value = it[field]; return toast(`The ${field} can't be empty, so it was kept.`); }
+    setField(it, field, t.value.trim(), false);
+  } else if (t.id === 'orgs' && state.settings) { state.settings.workOrgs = t.value.split(',').map(x => x.trim()).filter(Boolean); saveSettings(); }
 });
 
 document.addEventListener('submit', e => {

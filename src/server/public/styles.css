@@ -257,3 +257,5 @@ button.check:hover { filter: brightness(1.08); }
 @keyframes rise { from { transform: scaleY(.2); opacity: 0; } to { transform: none; opacity: 1; } }
 @keyframes toast { from { opacity: 0; transform: translate(-50%, 10px); } to { opacity: 1; transform: translate(-50%, 0); } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+.saved.failed { color: var(--coral); }
+.saved.failed::before { background: var(--coral); }
