@@ -12,15 +12,16 @@ function fake(routes: Record<string, { status: number; body?: unknown }>) {
 }
 
 describe('Everhour', () => {
-  it('checks tasks by li:{uuid} and logs time via POST /time', async () => {
-    const f = fake({ 'GET /tasks/li:abc': { status: 200, body: { id: 'li:abc' } }, 'GET /tasks/li:missing': { status: 404 }, 'POST /time': { status: 201, body: {} } });
+  it('checks tasks by li:{uuid} and sets time with PUT /tasks/{id}/time', async () => {
+    const f = fake({ 'GET /tasks/li:abc': { status: 200, body: { id: 'li:abc' } }, 'GET /tasks/li:missing': { status: 404 }, 'PUT /tasks/li:abc/time': { status: 200, body: {} } });
     const e = new Everhour('key', { fetchImpl: f.fetchImpl });
     expect(await e.taskExists('abc')).toBe(true);
     expect(await e.taskExists('missing')).toBe(false);
     await e.addTime({ issueUuid: 'abc', userId: 1400517, date: '2026-10-06', hours: 1.5 });
-    const post = f.calls.find(c => c.method === 'POST')!;
-    expect(post.body).toEqual({ task: 'li:abc', user: 1400517, date: '2026-10-06', time: 5400 });
-    expect(post.headers['X-Api-Key']).toBe('key');
+    const put = f.calls.find(c => c.method === 'PUT')!;
+    expect(put.body).toEqual({ time: 5400, date: '2026-10-06', user: 1400517 });
+    expect(put.headers['X-Api-Key']).toBe('key');
+    expect(f.calls.some(c => c.method === 'POST')).toBe(false);
   });
 
   it('sums user seconds and reports the Linear integration', async () => {
@@ -38,10 +39,10 @@ describe('Everhour', () => {
     await expect(new Everhour('k', { fetchImpl: f.fetchImpl }).syncProject('p')).resolves.toBeUndefined();
   });
 
-  it('addTime rejects when POST /time returns 404', async () => {
-    const f = fake({ 'POST /time': { status: 404 } });
+  it('addTime rejects when setting time returns 404', async () => {
+    const f = fake({});
     const e = new Everhour('k', { fetchImpl: f.fetchImpl });
-    await expect(e.addTime({ issueUuid: 'xyz', userId: 1, date: '2026-10-06', hours: 1 })).rejects.toThrow('POST /time returned 404 for li:xyz');
+    await expect(e.addTime({ issueUuid: 'xyz', userId: 1, date: '2026-10-06', hours: 1 })).rejects.toThrow('setting time returned 404 for li:xyz');
   });
 
   it('reads existing time records for a day, handling both task shapes', async () => {
@@ -54,23 +55,27 @@ describe('Everhour', () => {
     expect(await e.timeFor(7, '2026-10-06')).toEqual([{ task: 'li:a', seconds: 3600 }, { task: 'li:b', seconds: 1800 }, { task: null, seconds: 900 }]);
   });
 
-  it('addTime skips the POST when the same time is already logged for that task and day', async () => {
+  it('addTime skips the write when the same time is already logged, and sets (not adds) a new value', async () => {
     const f = fake({
       'GET /users/1/time?from=2026-10-06&to=2026-10-06&limit=10000': { status: 200, body: [{ task: { id: 'li:abc' }, date: '2026-10-06', time: 5400, user: 1 }] },
-      'POST /time': { status: 201, body: {} },
+      'PUT /tasks/li:abc/time': { status: 200, body: {} },
     });
     const e = new Everhour('k', { fetchImpl: f.fetchImpl });
     await e.addTime({ issueUuid: 'abc', userId: 1, date: '2026-10-06', hours: 1.5 });
-    expect(f.calls.filter(c => c.method === 'POST')).toHaveLength(0);
+    expect(f.calls.filter(c => c.method === 'PUT')).toHaveLength(0);
     await e.addTime({ issueUuid: 'abc', userId: 1, date: '2026-10-06', hours: 2 });
-    expect(f.calls.filter(c => c.method === 'POST').map(c => c.body.time)).toEqual([7200]);
+    expect(f.calls.filter(c => c.method === 'PUT').map(c => c.body.time)).toEqual([7200]);
   });
 
-  it('addTime never retries POST /time on a 5xx', async () => {
-    const f = fake({ 'POST /time': { status: 503, body: { message: 'down' } } });
-    const e = new Everhour('k', { fetchImpl: f.fetchImpl, sleep: async () => {} });
-    await expect(e.addTime({ issueUuid: 'abc', userId: 1, date: '2026-10-06', hours: 1 })).rejects.toThrow(/503/);
-    expect(f.calls.filter(c => c.method === 'POST')).toHaveLength(1);
+  it('retries setting time on a 5xx because PUT is safe to repeat', async () => {
+    let n = 0;
+    const fetchImpl = (async (_url: string, init: any) => {
+      if (init.method === 'GET') return new Response('[]', { status: 200 });
+      return new Response('{}', { status: ++n < 3 ? 503 : 200 });
+    }) as unknown as typeof fetch;
+    const e = new Everhour('k', { fetchImpl, sleep: async () => {} });
+    await e.addTime({ issueUuid: 'abc', userId: 1, date: '2026-10-06', hours: 1 });
+    expect(n).toBe(3);
   });
 
   it('taskExists rejects on authentication error', async () => {

@@ -6,18 +6,18 @@ export interface AddTime { issueUuid: string; userId: number; date: string; hour
 export interface TimeRecord { task: string | null; seconds: number }
 
 /**
- * Read-before-write, so a repeated call is safe whether POST /time upserts or adds (the smoke test verifies it
- * upserts). Same seconds already logged for (user, date, li:{uuid}) → no-op; none → POST; different → POST
- * (upsert intent). POST /time is never retried automatically: a lost response is resolved by the next run's read.
+ * Sets (never adds) a.hours on li:{uuid} for that day, so repeating it is always safe.
+ * Verified 2026-10-08 against the real API: POST /time ADDS to an existing record (0.5h + 0.75h = 1.25h),
+ * while PUT /tasks/{id}/time sets the exact value. Reads first and skips when the day already holds that value.
  */
 export async function logTimeOnce(
-  api: { timeFor(userId: number, date: string): Promise<TimeRecord[]>; postTime(a: AddTime): Promise<void> },
+  api: { timeFor(userId: number, date: string): Promise<TimeRecord[]>; setTime(a: AddTime): Promise<void> },
   a: AddTime,
 ): Promise<void> {
   const task = `li:${a.issueUuid}`;
   const existing = (await api.timeFor(a.userId, a.date)).filter(r => r.task === task);
   if (existing.length && existing.reduce((s, r) => s + r.seconds, 0) === Math.round(a.hours * 3600)) return;
-  await api.postTime(a);
+  await api.setTime(a);
 }
 
 export class Everhour {
@@ -61,11 +61,11 @@ export class Everhour {
     }));
   }
 
-  /** One POST /time with no automatic retry. */
-  async postTime(a: AddTime): Promise<void> {
-    const { status } = await this.req('POST', '/time', { task: `li:${a.issueUuid}`, user: a.userId, date: a.date, time: Math.round(a.hours * 3600) }, { retries: 0 });
+  /** PUT /tasks/{id}/time sets the day's time to exactly this value (0 clears it), so retries are safe. */
+  async setTime(a: AddTime): Promise<void> {
+    const { status } = await this.req('PUT', `/tasks/li:${a.issueUuid}/time`, { time: Math.round(a.hours * 3600), date: a.date, user: a.userId });
     if (status < 200 || status >= 300) {
-      throw new Error(`Everhour: POST /time returned ${status} for li:${a.issueUuid}`);
+      throw new Error(`Everhour: setting time returned ${status} for li:${a.issueUuid}`);
     }
   }
 

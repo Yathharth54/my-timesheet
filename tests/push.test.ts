@@ -79,7 +79,7 @@ describe('push', () => {
     expect([...everhour.times.values()].reduce((a, b) => a + b, 0)).toBe(8.5);
   });
 
-  it('never doubles hours when a POST /time response is lost, even if Everhour adds', async () => {
+  it('never doubles hours when a time response is lost', async () => {
     const linear = new FakeLinear();
     const everhour = new FakeEverhour();
     everhour.loseResponseEvery = 1;
