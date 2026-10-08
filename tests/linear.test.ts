@@ -22,6 +22,21 @@ describe('Linear', () => {
     expect(f.calls[0].body.variables.input).not.toHaveProperty('parentId');
   });
 
+  it('pages through projects in small queries', async () => {
+    const f = fakeFetch(body => {
+      const second = body.variables.after === 'c1';
+      return { data: { projects: {
+        nodes: [{ id: second ? 'p2' : 'p1', name: second ? 'Dev - Internal' : 'Boxsy', teams: { nodes: [{ id: 't', name: 'T', key: 'THE' }] } }],
+        pageInfo: { hasNextPage: !second, endCursor: second ? null : 'c1' },
+      } } };
+    });
+    const ps = await new Linear('k', { fetchImpl: f.fetchImpl }).projects();
+    expect(ps.map(p => p.name)).toEqual(['Boxsy', 'Dev - Internal']);
+    expect(f.calls).toHaveLength(2);
+    expect(f.calls[0].body.query).toMatch(/projects\(first: 50/);
+    expect(f.calls[0].body.query).toMatch(/teams\(first: 5\)/);
+  });
+
   it('getIssue returns null for missing issues and throws other GraphQL errors', async () => {
     const missing = new Linear('k', { fetchImpl: fakeFetch(() => ({ errors: [{ message: 'Entity not found: Issue' }] })).fetchImpl });
     expect(await missing.getIssue('nope')).toBeNull();

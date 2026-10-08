@@ -25,9 +25,20 @@ export class Linear {
     return (await this.gql<{ viewer: { id: string; email: string; name: string } }>('query { viewer { id email name } }')).viewer;
   }
 
+  /** Paged in 50s with at most 5 teams each: one big query trips Linear's complexity limit. */
   async projects(): Promise<{ id: string; name: string; teams: { id: string; name: string; key: string }[] }[]> {
-    const d = await this.gql<any>('query { projects(first: 250) { nodes { id name teams { nodes { id name key } } } } }');
-    return d.projects.nodes.map((p: any) => ({ id: p.id, name: p.name, teams: p.teams.nodes }));
+    const out: { id: string; name: string; teams: { id: string; name: string; key: string }[] }[] = [];
+    let after: string | null = null;
+    for (let page = 0; page < 40; page++) {
+      const d: any = await this.gql<any>(
+        'query($after: String) { projects(first: 50, after: $after) { nodes { id name teams(first: 5) { nodes { id name key } } } pageInfo { hasNextPage endCursor } } }',
+        { after },
+      );
+      out.push(...d.projects.nodes.map((p: any) => ({ id: p.id, name: p.name, teams: p.teams.nodes })));
+      if (!d.projects.pageInfo?.hasNextPage) break;
+      after = d.projects.pageInfo.endCursor;
+    }
+    return out;
   }
 
   async states(teamId: string): Promise<{ id: string; name: string; type: string }[]> {
