@@ -30,6 +30,26 @@ describe('review server', () => {
   });
   afterEach(async () => { await srv.close(); });
 
+  it('removes a project, clears it from repos, and protects the last internal project', async () => {
+    const { saveRepos, loadRepos, loadConfig } = await import('../src/lib/store.js');
+    saveRepos({ '/r': { class: 'work', project: 'Boxsy', name: 'o/r' } });
+    const r = await api('POST', '/api/projects/remove', { name: 'Boxsy' });
+    expect(r.status).toBe(200);
+    expect(r.json.projects.map((p: any) => p.name)).toEqual(['Dev - Internal']);
+    expect(loadConfig()!.projects.map(p => p.name)).toEqual(['Dev - Internal']);
+    expect(loadRepos()['/r'].project).toBeUndefined();
+    const last = await api('POST', '/api/projects/remove', { name: 'Dev - Internal' });
+    expect(last.status).toBe(400);
+    expect(last.json.error).toMatch(/at least one project/);
+    expect((await api('POST', '/api/projects/remove', { name: 'Nope' })).status).toBe(400);
+  });
+
+  it('will not remove the only internal project', async () => {
+    const r = await api('POST', '/api/projects/remove', { name: 'Dev - Internal' });
+    expect(r.status).toBe(400);
+    expect(r.json.error).toMatch(/only internal project/);
+  });
+
   it('rejects foreign Host headers (DNS rebinding)', async () => {
     const port = new URL(srv.url).port;
     const status = await new Promise<number>(res => {

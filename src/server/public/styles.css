@@ -232,6 +232,10 @@ button.check:hover { filter: brightness(1.08); }
 .seg button { height: 38px; padding: 0 12px; border: 0; background: transparent; color: var(--ink); font-family: var(--ui); transition: background .12s, color .12s; }
 .seg button + button { border-left: 1px solid var(--ink); }
 .seg button.on { background: var(--ink); color: var(--paper); }
+.proj-actions { display: inline-flex; align-items: center; gap: 8px; }
+.proj-remove { height: 38px; min-width: 96px; padding: 0 12px; border: 1px solid var(--bad-ink); background: transparent; color: var(--bad-ink); font-family: var(--ui); cursor: pointer; transition: background .12s, color .12s; }
+.proj-remove:hover { background: rgba(180, 35, 24, .08); }
+.proj-remove.armed { background: var(--bad-ink); color: var(--paper); }
 .slip input[type=text] { font-family: var(--mono); font-size: 15px; height: var(--h); border: 1px solid var(--leader); background: transparent; color: var(--ink); padding: 0 10px; width: 100%; }
 .slip label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--ink-2); }
 .repo-name { font-family: var(--mono); font-weight: 700; display: flex; align-items: center; gap: 8px; min-width: 0; }

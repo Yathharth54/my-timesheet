@@ -795,6 +795,21 @@ async function saveSettings() {
   } finally { state.settingsSaving = false; renderTop(); }
 }
 
+/** First press arms the button, the second removes the project from the config (Linear and Everhour are untouched). */
+async function removeProject(name) {
+  if (!name) return;
+  if (state.armedRemove !== name) { state.armedRemove = name; render(); return; }
+  state.armedRemove = null;
+  state.settingsSaving = true; renderTop();
+  try {
+    state.settings = await api('POST', '/api/projects/remove', { name });
+    state.projects = state.projects.filter(p => p.name !== name);
+    toast(`Removed ${name}`);
+  } catch (e) {
+    toast(e.message);
+  } finally { state.settingsSaving = false; render(); }
+}
+
 function renderSettings() {
   const s = state.settings;
   if (!s) { $('#view').innerHTML = '<div style="padding-top:24px"><h1 style="font-size:36px">Settings</h1><p class="lede">Loading…</p></div>'; return; }
@@ -821,8 +836,8 @@ function renderSettings() {
       <div style="display:flex;flex-direction:column;gap:22px">
         <section class="slip" aria-label="Projects">
           <h2>Projects</h2>
-          ${s.projects.map((p, k) => `<div class="slip-row inline"><span class="repo-name"><span class="swatch" style="background:${color(p.name)}"></span><span>${esc(p.name)}</span></span><div class="seg">${['billable', 'internal'].map(c => `<button class="${p.kind === c ? 'on' : ''}" data-act="proj-kind" data-k="${k}" data-c="${c}" aria-pressed="${p.kind === c}">${c[0].toUpperCase() + c.slice(1)}</button>`).join('')}</div></div>`).join('')}
-          <p>To add a project, run <strong>timesheet init</strong> in a terminal.</p>
+          ${s.projects.map((p, k) => `<div class="slip-row inline"><span class="repo-name"><span class="swatch" style="background:${color(p.name)}"></span><span>${esc(p.name)}</span></span><div class="proj-actions"><div class="seg">${['billable', 'internal'].map(c => `<button class="${p.kind === c ? 'on' : ''}" data-act="proj-kind" data-k="${k}" data-c="${c}" aria-pressed="${p.kind === c}">${c[0].toUpperCase() + c.slice(1)}</button>`).join('')}</div><button class="proj-remove ${state.armedRemove === p.name ? 'armed' : ''}" data-act="proj-remove" data-k="${k}" aria-label="Remove ${esc(p.name)}">${state.armedRemove === p.name ? 'Press again' : 'Remove'}</button></div></div>`).join('')}
+          <p>Removing a project only takes it off this list. Nothing changes in Linear or Everhour. To add a project, run <strong>timesheet init</strong> in a terminal.</p>
         </section>
         <section class="slip" aria-label="Work orgs">
           <h2>Work orgs on GitHub</h2>
@@ -867,6 +882,7 @@ document.addEventListener('click', e => {
   const a = t.dataset.act;
   const it = findItem(state.sel);
   if (a !== 'delete') state.armedDelete = null;
+  if (a !== 'proj-remove' && state.armedRemove) { state.armedRemove = null; if (state.tab === 'settings') render(); }
   switch (a) {
     case 'sel-toggle': state.openSel = state.openSel === t.dataset.sel ? null : t.dataset.sel; state.selActive = 0; render(); break;
     case 'sel-pick': pickSel(t.dataset.sel, +t.dataset.k); break;
@@ -897,6 +913,7 @@ document.addEventListener('click', e => {
     case 'print-cancel': case 'print-close': closePrint(); break;
     case 'repo-cls': { const r = state.settings.repos[+t.dataset.k]; r.class = t.dataset.c; if (r.class !== 'work') r.project = undefined; render(); saveSettings(); break; }
     case 'proj-kind': state.settings.projects[+t.dataset.k].kind = t.dataset.c; render(); saveSettings(); break;
+    case 'proj-remove': removeProject(state.settings.projects[+t.dataset.k]?.name); break;
     case 'nudge': state.settings.nudge = t.dataset.v === '1'; render(); saveSettings(); break;
   }
 });

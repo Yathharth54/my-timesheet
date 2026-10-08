@@ -1,11 +1,18 @@
 {
   "name": "my-timesheet",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Turn a week of Claude Code sessions and commits into Linear issues with Everhour time",
   "type": "module",
-  "bin": { "timesheet": "dist/cli/index.js" },
-  "files": ["dist", "skill"],
-  "engines": { "node": ">=20" },
+  "bin": {
+    "timesheet": "dist/cli/index.js"
+  },
+  "files": [
+    "dist",
+    "skill"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/copy-assets.mjs",
     "test": "TZ=UTC vitest run",

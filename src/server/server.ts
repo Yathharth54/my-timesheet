@@ -232,6 +232,30 @@ export function createServer(deps: ServerDeps = {}): http.Server {
           }
           return send(res, 200, { ok: true });
         }
+        case 'POST /api/projects/remove': {
+          const b = await readBody(req);
+          return send(res, 200, wrap(() => {
+            const c = requireConfig();
+            const name = String(b.name ?? '');
+            if (!c.projects.some(p => p.name === name)) throw new Error(`No project called ${name}.`);
+            if (c.projects.length === 1) throw new Error('You need at least one project.');
+            const rest = c.projects.filter(p => p.name !== name);
+            if (c.internalProject === name) {
+              const next = rest.find(p => p.kind === 'internal');
+              if (!next) throw new Error(`${name} is your only internal project. Mark another project as internal first.`);
+              c.internalProject = next.name;
+            }
+            c.projects = rest;
+            saveConfig(c);
+            const repos = loadRepos();
+            for (const e of Object.values(repos)) if (e.project === name) delete e.project;
+            saveRepos(repos);
+            return {
+              projects: c.projects.map(({ name: n, kind }) => ({ name: n, kind })), workOrgs: c.workOrgs, nudge: c.nudge,
+              repos: Object.entries(repos).map(([root, e]) => ({ root, ...e })),
+            };
+          }));
+        }
         case 'POST /api/push': {
           const b = await readBody(req);
           const w = resolveWeek(b.week, now());
