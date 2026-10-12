@@ -11,8 +11,11 @@ import { runClaude, runDistribute, type ClaudeRunner } from '../lib/weights.js';
 import { addManualItem, deleteItem, mechanicalSplit, mergeItems, setHours, splitItem } from '../lib/edit.js';
 import { push } from '../lib/push.js';
 import { acquireWeekLock } from '../lib/lock.js';
-import type { LinearApi } from '../lib/linear.js';
-import type { EverhourApi } from '../lib/everhour.js';
+import { applyOps, corrections, type Op } from '../lib/ops.js';
+import { removePushed } from '../lib/remove.js';
+import { assistPrompt, parseAssist, type Turn } from '../lib/assist.js';
+import type { LinearApi, LinearRemoveApi } from '../lib/linear.js';
+import type { Everhour, EverhourApi } from '../lib/everhour.js';
 import type { Draft, RepoClass, Warning, WeekEvidence } from '../lib/types.js';
 import { clientsFromSecrets } from '../cli/commands/push.js';
 
@@ -23,7 +26,7 @@ const STATIC: Record<string, [string, string]> = {
   '/styles.css': ['styles.css', 'text/css; charset=utf-8'],
 };
 
-type Clients = { linear: LinearApi; everhour: EverhourApi & { userSeconds(id: number, from: string, to: string): Promise<number> } };
+type Clients = { linear: LinearApi & LinearRemoveApi; everhour: EverhourApi & Pick<Everhour, 'setTime'> & { userSeconds(id: number, from: string, to: string): Promise<number> } };
 export interface ServerDeps { run?: ClaudeRunner; clients?: () => Clients; now?: () => Date }
 type PushState = { status: 'idle' | 'running' | 'blocked' | 'awaiting_sync' | 'done' | 'error'; phase?: string; done?: number; total?: number; missing?: { identifier: string; project: string }[]; warnings?: Warning[]; error?: string };
 
@@ -82,11 +85,8 @@ export function createServer(deps: ServerDeps = {}): http.Server {
       if (!old) return i;
       if (old.linear?.created) return old;
       if (old.linear) i.linear = old.linear;
-      if (old.project !== i.project) appendLine(paths.examples(), { kind: 'bucket', title: i.title, description: i.description, from: old.project, to: i.project, at: new Date().toISOString() });
-      if (old.title !== i.title || old.description !== i.description) {
-        appendLine(paths.examples(), { kind: 'rewrite', before: { title: old.title, description: old.description }, after: { title: i.title, description: i.description }, at: new Date().toISOString() });
-        i.edited = true;
-      }
+      for (const ex of corrections(old, i)) appendLine(paths.examples(), ex);
+      if (old.title !== i.title || old.description !== i.description) i.edited = true;
       return i;
     });
     const have = new Set(incoming.items.map(i => i.id));
@@ -199,6 +199,56 @@ export function createServer(deps: ServerDeps = {}): http.Server {
           }));
         }
         case 'POST /api/merge': { const b = await readBody(req); return send(res, 200, wrap(() => { assertNotPushing(resolveWeek(b.week, now())); return commit(mergeItems(current(resolveWeek(b.week, now())), b.ids)); })); }
+        case 'POST /api/bulk': {
+          const b = await readBody(req);
+          const w = resolveWeek(b.week, now());
+          return send(res, 200, wrap(() => {
+            assertNotPushing(w);
+            const cur = current(w);
+            if (b.rev !== undefined && b.rev !== cur.rev) throw new ApiError(409, 'The draft changed elsewhere. Reloaded.', { draft: cur });
+            const r = applyOps(cur, b.ops as Op[], projectNames());
+            for (const ex of r.examples) appendLine(paths.examples(), ex);
+            return { ...commit(r.draft), summary: r.summary, remote: r.remote };
+          }));
+        }
+        case 'POST /api/remove': {
+          const b = await readBody(req);
+          const w = resolveWeek(b.week, now());
+          if (b.confirm !== true) throw new ApiError(400, 'Deleting issues from Linear and Everhour needs confirm: true.');
+          if (!Array.isArray(b.ids) || !b.ids.length) throw new ApiError(400, 'No issues to delete.');
+          assertNotPushing(w);
+          let release: () => void;
+          try { release = acquireWeekLock(w); } catch (e) { throw busy(e); }
+          try {
+            const draft = loadDraft(w);
+            if (!draft) throw new ApiError(400, 'No draft for this week.');
+            const { linear, everhour } = clients();
+            const r = await removePushed(draft, b.ids.map(String), { linear, everhour, config: requireConfig(), save: saveDraft });
+            ehCache.delete(w);
+            return send(res, 200, { ...commit(draft), ...r });
+          } finally { release(); }
+        }
+        case 'POST /api/assist': {
+          const b = await readBody(req);
+          const w = resolveWeek(b.week, now());
+          const message = String(b.message ?? '').trim();
+          if (!message) throw new ApiError(400, 'Say what to change.');
+          const history: Turn[] = (Array.isArray(b.history) ? b.history : []).slice(-3)
+            .map((t: Partial<Turn>) => ({ message: String(t?.message ?? ''), reply: String(t?.reply ?? '') }));
+          const d = current(w);
+          const answer = (reply: string, extra: Record<string, unknown> = {}) => send(res, 200, { reply, ops: [], summary: [], remote: [], rev: d.rev, ...extra });
+          let text: string;
+          try { text = await run(assistPrompt(d, requireConfig(), message, history)); } catch (e) { throw new ApiError(502, `Claude couldn't answer: ${(e as Error).message}`); }
+          let parsed: ReturnType<typeof parseAssist>;
+          try { parsed = parseAssist(text); } catch (e) { return answer((e as Error).message); }
+          if (!parsed.ops.length) return answer(parsed.reply || "Claude didn't suggest any changes.");
+          try {
+            const r = applyOps(d, parsed.ops, projectNames());
+            return answer(parsed.reply, { ops: parsed.ops, summary: r.summary, remote: r.remote });
+          } catch (e) {
+            return answer(`${parsed.reply} That can't be applied, though: ${(e as Error).message}`.trim());
+          }
+        }
         case 'GET /api/everhour': return send(res, 200, { hours: await everhourHours(week) });
         case 'GET /api/history': return send(res, 200, listWeeks().flatMap(w => {
           const d = loadDraft(w);

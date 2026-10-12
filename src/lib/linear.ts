@@ -66,9 +66,23 @@ export class Linear {
     return { uuid: i.id, identifier: i.identifier, url: i.url };
   }
 
+  /**
+   * Moves the issue to Linear's trash (restorable for 30 days; verified 2026-10-12). Never passes
+   * permanentlyDelete. An issue that is already trashed or gone counts as done, so retries are safe.
+   */
   async deleteIssue(id: string): Promise<void> {
-    await this.gql('mutation($id: String!) { issueDelete(id: $id) { success } }', { id });
+    try {
+      await this.gql('mutation($id: String!) { issueDelete(id: $id) { success } }', { id });
+    } catch (e) {
+      let gone = false;
+      try {
+        const d = await this.gql<any>('query($id: String!) { issue(id: $id) { trashed } }', { id });
+        gone = !d.issue || d.issue.trashed === true;
+      } catch (q) { gone = /not found/i.test((q as Error).message); }
+      if (!gone) throw e;
+    }
   }
 }
 
 export type LinearApi = Pick<Linear, 'getIssue' | 'createIssue'>;
+export type LinearRemoveApi = Pick<Linear, 'deleteIssue'>;

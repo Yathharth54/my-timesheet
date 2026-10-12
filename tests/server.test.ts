@@ -243,6 +243,8 @@ describe('review server', () => {
       expect((await g('PUT', '/api/draft', { draft: s.draft })).status).toBe(423);
       expect((await g('POST', '/api/hours', { week: W, id: 'a', hours: 1 })).status).toBe(423);
       expect((await g('POST', '/api/delete', { week: W, id: 'a' })).status).toBe(423);
+      expect((await g('POST', '/api/bulk', { week: W, ops: [{ op: 'delete', ids: ['a'] }] })).status).toBe(423);
+      expect((await g('POST', '/api/remove', { week: W, ids: ['a'], confirm: true })).status).toBe(423);
       // another server process sees only the week lock
       const other = await api('POST', '/api/distribute', { week: W, reweight: false });
       expect(other.status).toBe(423);
@@ -252,5 +254,70 @@ describe('review server', () => {
       for (let i = 0; i < 100 && (await g('GET', `/api/push?week=${W}`)).json.status === 'running'; i++) await new Promise(r => setTimeout(r, 20));
       await gated.close();
     }
+  });
+
+  it('applies bulk ops in one save, logs corrections and rejects a stale rev', async () => {
+    const { json } = await api('GET', `/api/state?week=${W}`);
+    const r = await api('POST', '/api/bulk', { week: W, rev: json.draft.rev, ops: [{ op: 'set', ids: ['a', 'b'], project: 'Dev - Internal' }] });
+    expect(r.status).toBe(200);
+    expect(r.json.draft.rev).toBe(json.draft.rev + 1);
+    expect(r.json.draft.items.every((i: any) => i.project === 'Dev - Internal')).toBe(true);
+    expect(r.json.summary).toEqual(['Move 2 issues to Dev - Internal']);
+    expect(r.json.draft.parents.map((p: any) => p.key)).toEqual(['2026-10-05|Dev - Internal']);
+    expect(readJsonl<any>(paths.examples()).map(e => e.kind)).toEqual(['bucket', 'bucket']);
+    const stale = await api('POST', '/api/bulk', { week: W, rev: json.draft.rev, ops: [{ op: 'delete', ids: ['a'] }] });
+    expect(stale.status).toBe(409);
+    expect(stale.json.draft.rev).toBe(r.json.draft.rev);
+    expect((await api('POST', '/api/bulk', { week: W, ops: [{ op: 'set', ids: ['a'], project: 'Nope' }] })).status).toBe(400);
+  });
+
+  it('deletes pushed issues only with confirm, clearing Everhour and trashing in Linear', async () => {
+    const d = loadDraft(W)!;
+    d.items[0].linear = { uuid: 'ua', identifier: 'THE-1', url: null, created: true };
+    d.items[0].everhour = { logged: true };
+    d.items[0].hours = 2;
+    d.parents[0].linear = { uuid: 'up', identifier: 'THE-0', url: null, created: true };
+    saveDraft(d);
+    const linear = new FakeLinear();
+    const own = await startServer(0, { clients: () => ({ linear, everhour }), now: () => new Date('2026-10-06T10:00:00Z') });
+    const post = async (p: string, body: unknown) => {
+      const r = await fetch(own.url + p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      return { status: r.status, json: await r.json() };
+    };
+    try {
+      expect((await post('/api/remove', { week: W, ids: ['a'] })).status).toBe(400);
+      const bulk = await post('/api/bulk', { week: W, ops: [{ op: 'delete', ids: ['a'] }] });
+      expect(bulk.json.remote).toEqual(['a']);
+      expect(bulk.json.draft.items[0].deleted).toBe(false);
+      const r = await post('/api/remove', { week: W, ids: ['a'], confirm: true });
+      expect(r.status).toBe(200);
+      expect(r.json).toMatchObject({ removed: ['a'], parents: [], failed: [] }); // b still sits under that parent
+      expect(r.json.draft.items[0].deleted).toBe(true);
+      expect(everhour.times.get('ua|2026-10-05')).toBe(0);
+      expect(linear.trashed.has('ua')).toBe(true);
+    } finally { await own.close(); }
+  });
+
+  it('asks Claude for ops and validates them without applying', async () => {
+    const replies = [
+      '```json\n{"reply":"Moving both to internal.","ops":[{"op":"set","ids":["a","b"],"project":"Dev - Internal"}]}\n```',
+      '{"reply":"Deleting it.","ops":[{"op":"delete","ids":["ghost"]}]}',
+      'I am not sure what you mean.',
+    ];
+    const prompts: string[] = [];
+    const own = await startServer(0, { run: async p => { prompts.push(p); return replies.shift()!; }, clients: () => ({ linear: new FakeLinear(), everhour }), now: () => new Date('2026-10-06T10:00:00Z') });
+    const post = async (body: unknown) => (await fetch(own.url + '/api/assist', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).json();
+    try {
+      const ok = await post({ week: W, message: 'move all to internal' });
+      expect(ok).toMatchObject({ reply: 'Moving both to internal.', summary: ['Move 2 issues to Dev - Internal'], remote: [] });
+      expect(ok.ops).toHaveLength(1);
+      expect(loadDraft(W)!.items[0].project).toBe('Boxsy');
+      const bad = await post({ week: W, message: 'delete ghost', history: [{ message: 'move all to internal', reply: 'Moving both to internal.' }] });
+      expect(bad.ops).toEqual([]);
+      expect(bad.reply).toMatch(/No issue with id ghost/);
+      expect(prompts[1]).toContain('Person: move all to internal');
+      const junk = await post({ week: W, message: '??' });
+      expect(junk).toMatchObject({ ops: [], reply: expect.stringMatching(/didn't return/) });
+    } finally { await own.close(); }
   });
 });

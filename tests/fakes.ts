@@ -23,6 +23,13 @@ export class FakeLinear implements LinearApi {
     if (this.loseResponseEvery && this.creates % this.loseResponseEvery === 0) throw new Error('socket hang up');
     return { uuid: input.id, identifier, url: `https://linear.app/t/${identifier}` };
   }
+  trashed = new Set<string>();
+  failDeleteFor = new Set<string>();
+  async deleteIssue(id: string) {
+    this.tick();
+    if (this.failDeleteFor.has(id)) throw new Error('Linear: You do not have permission to delete this issue');
+    this.trashed.add(id);
+  }
 }
 
 /** Everhour fake. setTime sets the exact value, as the real PUT /tasks/{id}/time does. */
