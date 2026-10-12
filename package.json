@@ -1,6 +1,6 @@
 {
   "name": "my-timesheet",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Turn a week of Claude Code sessions and commits into Linear issues with Everhour time",
   "type": "module",
   "bin": {
