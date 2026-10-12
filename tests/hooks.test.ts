@@ -14,6 +14,23 @@ const turn = { session_id: 's1', transcript_path: '/t/s1.jsonl' };
 describe('hooks', () => {
   beforeEach(() => { tmpHome(); delete process.env.TIMESHEET_DISABLE_HOOKS; });
 
+  it('session start brings the copied /timesheet files up to the installed version', async () => {
+    const path = await import('node:path');
+    const { tmpDir } = await import('./helpers.js');
+    const { installSkillFiles } = await import('../src/lib/install.js');
+    saveConfig(testConfig());
+    saveRepos({ '/r': { class: 'personal' } });
+    const pkg = tmpDir();
+    fs.mkdirSync(path.join(pkg, 'skill', 'commands'), { recursive: true });
+    fs.writeFileSync(path.join(pkg, 'skill', 'SKILL.md'), 'v1');
+    fs.writeFileSync(path.join(pkg, 'skill', 'commands', 'timesheet.md'), 'v1');
+    const [skill, cmd] = installSkillFiles(pkg);
+    fs.writeFileSync(path.join(pkg, 'skill', 'SKILL.md'), 'v2'); // npm install -g replaced the package
+    fs.writeFileSync(path.join(pkg, 'skill', 'commands', 'timesheet.md'), 'v2');
+    sessionStartContext({ cwd: '/r' }, { now, git: probe('/r', []), pkgRoot: pkg });
+    expect([fs.readFileSync(skill, 'utf8'), fs.readFileSync(cmd, 'utf8')]).toEqual(['v2', 'v2']);
+  });
+
   it('does nothing before init', () => {
     expect(sessionStartContext({ cwd: '/r' }, { now, git: probe('/r', []) })).toBeNull();
     expect(recordTurn({ cwd: '/r', ...turn }, { now, git: probe('/r', []) })).toBe(false);

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import { tmpDir, tmpHome } from './helpers.js';
-import { installHooks, uninstallHooks, hooksInstalled, installSkillFiles, uninstallSkillFiles, claudeDir } from '../src/lib/install.js';
+import { installHooks, uninstallHooks, hooksInstalled, installSkillFiles, uninstallSkillFiles, claudeDir, refreshSkillFiles, hookedPackageRoot } from '../src/lib/install.js';
 
 const existing = {
   theme: 'dark',
@@ -47,5 +47,23 @@ describe('install', () => {
     expect(files.every(f => fs.existsSync(f))).toBe(true);
     uninstallSkillFiles();
     expect(files.some(f => fs.existsSync(f))).toBe(false);
+  });
+
+  it('refreshes copied files that changed after an upgrade, and leaves uninstalled ones alone', () => {
+    const [skill, cmd] = installSkillFiles(pkg);
+    expect(refreshSkillFiles(pkg)).toEqual([]);
+    fs.writeFileSync(path.join(pkg, 'skill', 'SKILL.md'), '---\nname: timesheet\n---\nnew rules\n');
+    expect(refreshSkillFiles(pkg)).toEqual([skill]);
+    expect(fs.readFileSync(skill, 'utf8')).toMatch(/new rules/);
+    fs.rmSync(cmd);
+    fs.writeFileSync(path.join(pkg, 'skill', 'commands', 'timesheet.md'), 'cmd v2');
+    expect(refreshSkillFiles(pkg)).toEqual([]);
+    expect(fs.existsSync(cmd)).toBe(false);
+  });
+
+  it('reads back which package the hooks run', () => {
+    expect(hookedPackageRoot()).toBe(null);
+    installHooks(pkg);
+    expect(hookedPackageRoot()).toBe(pkg);
   });
 });

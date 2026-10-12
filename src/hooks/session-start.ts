@@ -4,6 +4,7 @@ import { loadConfig, loadDraft, loadRepos } from '../lib/store.js';
 import { paths } from '../lib/paths.js';
 import { isoWeek, shiftWeek } from '../lib/week.js';
 import type { Config } from '../lib/types.js';
+import { packageRoot, refreshSkillFiles } from '../lib/install.js';
 import { hooksDisabled, isMain, logHookError, readStdin } from './common.js';
 
 const billable = (c: Config) => c.projects.filter(p => p.kind === 'billable').map(p => p.name).join(', ');
@@ -33,10 +34,11 @@ function nudge(c: Config, now: Date): string | null {
   return `my-timesheet: the timesheet for ${week} hasn't been pushed. Mention once, briefly, that the user can run /timesheet${isMonday ? ' last' : ''}.`;
 }
 
-export function sessionStartContext(input: { cwd: string }, deps: { now: Date; git: GitProbe }): string | null {
+export function sessionStartContext(input: { cwd: string }, deps: { now: Date; git: GitProbe; pkgRoot?: string }): string | null {
   if (hooksDisabled()) return null;
   const config = loadConfig();
   if (!config) return null;
+  try { refreshSkillFiles(deps.pkgRoot ?? packageRoot()); } catch (e) { logHookError('session-start', e); } // after an upgrade
   const c = classify(input.cwd, loadRepos(), config.workOrgs, deps.git);
   const lines: string[] = [];
   if (c.kind === 'org') {

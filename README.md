@@ -75,4 +75,12 @@ Picked issues get a bar at the bottom: move to a project or day, copy to more da
 | `timesheet doctor` | check keys, hooks and tools |
 | `timesheet uninstall [--purge]` | remove hooks (and data) |
 
+## Updating
+
+```
+npm install -g my-timesheet@latest
+```
+
+Restart `timesheet review` if it's open. The next Claude session updates `/timesheet` by itself; your config, keys, hooks and drafted weeks stay as they are. `timesheet doctor` says if anything is out of step.
+
 Keys live in the macOS Keychain. Everything else is in `~/.timesheet/`. Nothing is written to Linear or Everhour until you push, or until you confirm deleting a pushed issue (it goes to Linear's trash and its Everhour time is cleared). Before that, Distribute sends item titles, descriptions and evidence counts to Claude via `claude -p`, Ask Claude in the review page (press `/` or ⌘K) sends the week's issues to Claude the same way; its suggestions only apply when you press Apply. The review page also reads your week's Everhour total.

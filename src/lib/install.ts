@@ -66,6 +66,39 @@ export function installSkillFiles(pkgRoot: string): string[] {
   return skillTargets(pkgRoot).map(([, dst]) => dst);
 }
 
+/**
+ * Keeps the copied skill and command files in step with the installed package. `npm install -g` replaces the
+ * package in place, so the hooks already run the new code; this brings the copies in ~/.claude along on the next
+ * session start. Only files that are there and differ are rewritten, so an uninstall stays an uninstall.
+ */
+export function refreshSkillFiles(pkgRoot: string): string[] {
+  const out: string[] = [];
+  for (const [src, dst] of skillTargets(pkgRoot)) {
+    if (!fs.existsSync(dst) || !fs.existsSync(src)) continue;
+    const want = fs.readFileSync(src);
+    if (want.equals(fs.readFileSync(dst))) continue;
+    fs.writeFileSync(dst, want);
+    out.push(dst);
+  }
+  return out;
+}
+
+/** The package root our installed hooks run from, read from settings.json. */
+export function hookedPackageRoot(): string | null {
+  const s = readJson<Record<string, any>>(settingsFile(), {});
+  for (const g of (s.hooks?.SessionStart ?? []) as Group[]) {
+    for (const h of g.hooks ?? []) {
+      const m = isOurs(h) ? /node "(.+)[\\/]dist[\\/]hooks[\\/]session-start\.js"/.exec(h.command ?? '') : null;
+      if (m) return m[1];
+    }
+  }
+  return null;
+}
+
+export const packageVersion = (pkgRoot: string): string | null => {
+  try { return (JSON.parse(fs.readFileSync(path.join(pkgRoot, 'package.json'), 'utf8')) as { version?: string }).version ?? null; } catch { return null; }
+};
+
 export function uninstallSkillFiles(): void {
   fs.rmSync(path.join(claudeDir(), 'skills', 'timesheet'), { recursive: true, force: true });
   fs.rmSync(path.join(claudeDir(), 'commands', 'timesheet.md'), { force: true });
