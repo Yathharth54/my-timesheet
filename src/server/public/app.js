@@ -42,9 +42,28 @@ const state = {
   picked: new Set(), pickAnchor: null, // issues picked for a bulk change; `sel` stays the one in the editor
   modal: null, modalReturn: null, // the confirm dialog
   ask: null, askReturn: null, // Ask mode: chat on the left, receipt on the right
+  viewEnter: null, // 'tab' | 'back': the next render of the view animates in once
   openSel: null, selActive: 0,
   print: null, settings: null, settingsSaving: false, history: null, loadError: null,
 };
+
+// ---------- motion ----------
+/** One-shot entrance: the next render of a view animates in, later re-renders stay still. */
+function takeEnter() { const e = state.viewEnter; state.viewEnter = null; return e ? `enter ${e}` : ''; }
+const easeInOut = t => (t < .5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2);
+/** Splits text into words that appear one after another on a speed ramp: slow start, quick middle, soft landing. Returns [html, total ms]. */
+function typeIn(text, total = null, start = 0) {
+  const words = String(text).split(/(\s+)/);
+  const n = words.filter(w => w.trim()).length;
+  const span = total ?? Math.min(900, 40 + n * 32);
+  let k = 0;
+  const html = words.map(w => {
+    if (!w.trim()) return w;
+    const d = Math.round(start + span * easeInOut(n > 1 ? k++ / (n - 1) : 0));
+    return `<span class="tw" style="animation-delay:${d}ms">${esc(w)}</span>`;
+  }).join('');
+  return [html, start + span];
+}
 
 async function api(method, url, body, signal) {
   const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined, signal });
@@ -494,14 +513,17 @@ function closeAsk() {
   const a = state.ask;
   if (!a || a.status === 'applying') return;
   a.ctl?.abort();
-  state.ask = null;
+  state.ask = null; state.viewEnter = 'back';
   if (state.askReturn?.tab && state.askReturn.tab !== 'week') return switchTab(state.askReturn.tab);
   render();
 }
 /** Re-renders only the suggestions under the input, so typing never repaints the page. */
 function renderAskSuggest() {
   const el = $('#ask-suggest');
-  if (el) el.innerHTML = askSuggestHtml();
+  if (!el) return;
+  const was = !!el.firstElementChild;
+  el.innerHTML = askSuggestHtml();
+  if (!was) el.firstElementChild?.classList.add('enter'); // pops in when it appears, not on every key
 }
 function askSuggestHtml() {
   const a = state.ask;
@@ -512,7 +534,7 @@ function askSuggestHtml() {
 function runAskCommand(k) {
   const row = commandRows(state.ask.q)[k];
   if (!row) return;
-  state.ask = null; render();
+  state.ask = null; state.viewEnter = 'back'; render();
   row.run();
 }
 async function sendAsk(text) {
@@ -567,7 +589,7 @@ async function applyAsk() {
   const res = await bulk(a.pending.ops, a.pending.rev);
   if (state.ask !== a) return;
   if (!res) { a.status = 'answer'; render(); return; }
-  state.ask = null;
+  state.ask = null; state.viewEnter = 'back';
   render();
   if (res.remote.length) return requestDelete(res.remote);
   toast(`Done. ${res.summary.join('. ')}.`);
@@ -597,7 +619,7 @@ function select(id, options, value, onPick, opt = {}) {
       ${cur?.color ? `<span class="swatch" style="background:${cur.color}"></span>` : ''}
       <span class="lbl ${cur ? '' : 'ph'}">${esc(cur ? cur.label : (opt.placeholder || 'Choose'))}</span>${CHEV}
     </button>
-    ${open ? `<ul class="sel-list" role="listbox" aria-labelledby="${id}">${options.map((o, k) => `<li class="sel-opt ${k === state.selActive ? 'active' : ''}" role="option" aria-selected="${o.v === value}" data-act="sel-pick" data-sel="${id}" data-k="${k}">${o.color ? `<span class="swatch" style="background:${o.color}"></span>` : ''}<span>${esc(o.label)}</span>${o.hint ? `<span class="hint">${esc(o.hint)}</span>` : ''}</li>`).join('')}</ul>` : ''}
+    ${open ? `<ul class="sel-list ${state.selEnter === id ? 'enter' : ''}" role="listbox" aria-labelledby="${id}">${options.map((o, k) => `<li class="sel-opt ${k === state.selActive ? 'active' : ''}" role="option" aria-selected="${o.v === value}" data-act="sel-pick" data-sel="${id}" data-k="${k}">${o.color ? `<span class="swatch" style="background:${o.color}"></span>` : ''}<span>${esc(o.label)}</span>${o.hint ? `<span class="hint">${esc(o.hint)}</span>` : ''}</li>`).join('')}</ul>` : ''}
   </div>`;
 }
 const projectOptions = () => state.projects.map(p => ({ v: p.name, label: p.name, hint: p.kind, color: color(p.name) }));
@@ -702,7 +724,8 @@ const SEND = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke
 function renderAsk() {
   const a = state.ask;
   const turns = a.turns.map(t => {
-    const you = `<div class="ask-you">${esc(t.message)}</div>`;
+    const youFresh = !t.sent; t.sent = true;
+    const you = `<div class="ask-you ${youFresh ? 'fresh' : ''}">${esc(t.message)}</div>`;
     let them = '';
     if (t.state === 'thinking') them = `<div class="ask-claude"><span class="ask-avatar">${SPARK}</span><div class="ask-text ask-wait">Reading your week<span class="dots"><i>.</i><i>.</i><i>.</i></span></div></div>`;
     else if (t.state === 'error') them = `<div class="ask-claude"><span class="ask-avatar">${SPARK}</span><div class="ask-text ask-err">${esc(t.reply)}</div></div>`;
@@ -713,12 +736,14 @@ function renderAsk() {
           ${t.remote.length && t.state === 'proposed' ? `<p>${plural(t.remote.length, 'issue')} ${t.remote.length === 1 ? 'is' : 'are'} already in Linear. You confirm ${t.remote.length === 1 ? 'that delete' : 'those deletes'} next.</p>` : ''}
           ${t.state === 'proposed' ? `<div class="ask-actions"><button class="btn solid" id="ask-apply" data-act="ask-apply" ${a.status === 'applying' ? 'disabled' : ''}>${a.status === 'applying' ? 'Applying…' : 'Apply changes'}</button><button class="btn ghost" data-act="ask-discard" ${a.status === 'applying' ? 'disabled' : ''}>Discard</button></div>` : ''}
         </div>` : '';
-      them = `<div class="ask-claude"><span class="ask-avatar">${SPARK}</span><div class="ask-text">${esc(t.reply || 'Nothing to change.')}${changes}</div></div>`;
+      const fresh = !t.typed; t.typed = true; // types in once, when the answer lands
+      const [text, after] = fresh ? typeIn(t.reply || 'Nothing to change.') : [esc(t.reply || 'Nothing to change.'), 0];
+      them = `<div class="ask-claude ${fresh ? 'fresh' : ''}" style="--after:${after + 80}ms"><span class="ask-avatar">${SPARK}</span><div class="ask-text">${text}${changes}</div></div>`;
     }
     return you + them;
   }).join('');
   const intro = a.turns.length ? '' : `<div class="ask-intro">
-      <h1>What should change?</h1>
+      <h1>${a.enter ? typeIn('What should change?', 260, 120)[0] : 'What should change?'}</h1>
       <p class="lede">Claude reads every issue in week ${weekNo(state.week)} and suggests edits. You see them on the receipt before anything changes.</p>
       <div class="ask-examples">${EXAMPLES.map(x => `<button class="ask-example" data-act="ask-example" data-text="${esc(x)}">${esc(x)}</button>`).join('')}</div>
     </div>`;
@@ -746,7 +771,7 @@ function renderView() {
   if (state.loadError) { $('#view').innerHTML = `<div class="load-error">✗ ${esc(state.loadError)}</div>`; return; }
   if (!state.draft) return;
   if (state.print) return renderPrint();
-  if (state.ask) { $('#view').innerHTML = `<div class="ask-grid">${renderAsk()}${renderReceipt(false)}</div>`; return; }
+  if (state.ask) { $('#view').innerHTML = `<div class="ask-grid ${state.ask.enter ? 'enter' : ''}">${renderAsk()}${renderReceipt(false)}</div>`; return; }
   if (state.tab === 'history') return renderHistory();
   if (state.tab === 'settings') return renderSettings();
   renderWeek();
@@ -755,16 +780,18 @@ function renderView() {
 // ---------- week ----------
 function renderWeek() {
   const feed = !state.fed; state.fed = true;
-  $('#view').innerHTML = `<div class="grid ${state.picked.size ? 'picking' : ''}">${renderSetup()}${renderReceipt(feed)}${renderEditor()}</div>${renderBulk()}`;
+  $('#view').innerHTML = `<div class="grid ${state.picked.size ? 'picking' : ''} ${takeEnter()}">${renderSetup()}${renderReceipt(feed)}${renderEditor()}</div>${renderBulk()}`;
 }
 
 function renderBulk() {
   const its = pickedItems();
+  const appear = its.length > 0 && !state.bulkShown;
+  state.bulkShown = its.length > 0;
   if (!its.length) return '';
   const pushed = its.filter(isFrozen).length;
   const same = f => { const v = new Set(its.map(i => i[f])); return v.size === 1 ? [...v][0] : null; };
   const days = weekDays(state.draft.week);
-  return `<div class="bulk" role="toolbar" aria-label="Change the picked issues">
+  return `<div class="bulk ${appear ? 'enter' : ''}" role="toolbar" aria-label="Change the picked issues">
     <span class="bulk-count"><strong>${its.length}</strong> picked</span><span class="bulk-sep" aria-hidden="true"></span>
     <div class="bulk-sel">${select('bulk-project', projectOptions(), same('project'), v => bulkSet('project', v), { placeholder: 'Move to project', label: 'Move picked issues to a project', disabled: pushed > 0 })}</div>
     <div class="bulk-sel">${select('bulk-day', days.map(x => ({ v: x, label: dname(x), hint: state.draft.days.includes(x) ? '' : 'not counted' })), same('day'), v => bulkSet('day', v), { placeholder: 'Move to day', label: 'Move picked issues to a day', disabled: pushed > 0 })}</div>
@@ -1144,7 +1171,7 @@ function renderHistory() {
   const avg = printed.length ? printed.reduce((s, w) => s + w.total, 0) / printed.length : 0;
   const used = new Set(weeks.flatMap(w => Object.keys(w.byProject ?? {})));
   $('#view').innerHTML = `
-    <div class="page">
+    <div class="page ${takeEnter()}">
       <div class="page-head">
         <div><h1>Past weeks</h1><p class="lede">Every week you've drafted. Taller receipts are longer weeks.</p></div>
         ${printed.length ? `<div><div style="font-family:var(--mono);font-weight:700;font-size:30px">${fmt(avg)} h</div><div class="faint">average over ${plural(printed.length, 'printed week')}</div></div>` : ''}
@@ -1228,7 +1255,7 @@ function renderSettings() {
       <div class="proj-actions">${seg([['billable', 'Billable'], ['internal', 'Internal']], p.kind, 'proj-kind', k)}<button class="btn danger ${state.armedRemove === p.name ? 'armed' : ''}" data-act="proj-remove" data-k="${k}" aria-label="Remove ${esc(p.name)}">${state.armedRemove === p.name ? 'Press again' : 'Remove'}</button></div>
     </div>`).join('');
   $('#view').innerHTML = `
-    <div class="page settings-page">
+    <div class="page settings-page ${takeEnter()}">
       <div><h1>Settings</h1><p class="lede">What counts as work, where it bills, and when to remind you.</p></div>
       ${section('Repos', 'Only work repos are logged. Repos in your work orgs count as work on their own; anything else is asked about once.', repos)}
       ${section('Projects', 'Removing a project only takes it off this list. Linear and Everhour stay as they are. To add one, run <strong>timesheet init</strong>.', projects)}
@@ -1244,7 +1271,7 @@ function goWeek(week) {
   return load(week).catch(e => toast(e.message));
 }
 function switchTab(tab) {
-  state.openSel = null;
+  state.openSel = null; state.viewEnter = 'tab';
   if (tab === 'history') return openHistory();
   if (tab === 'settings') return openSettings();
   state.tab = 'week'; state.print = null; state.fed = false; render();
@@ -1259,7 +1286,7 @@ document.addEventListener('click', e => {
   if (a !== 'delete') state.armedDelete = null;
   if (a !== 'proj-remove' && state.armedRemove) { state.armedRemove = null; if (state.tab === 'settings') render(); }
   switch (a) {
-    case 'sel-toggle': state.openSel = state.openSel === t.dataset.sel ? null : t.dataset.sel; state.selActive = 0; render(); break;
+    case 'sel-toggle': state.openSel = state.openSel === t.dataset.sel ? null : t.dataset.sel; state.selActive = 0; state.selEnter = state.openSel; render(); state.selEnter = null; break;
     case 'sel-pick': pickSel(t.dataset.sel, +t.dataset.k); break;
     case 'tab': switchTab(t.dataset.k); break;
     case 'prev': case 'next': goWeek(shiftWeek(state.week, a === 'prev' ? -1 : 1)); break;
