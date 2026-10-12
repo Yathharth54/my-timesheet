@@ -239,7 +239,7 @@ button.check:hover span:last-child { text-decoration: underline; text-decoration
 .callout .btn:hover:not([disabled]) { background: var(--raise); }
 .callout .btn.ink { background: var(--amber); border-color: var(--amber); color: var(--ink); font-weight: 600; }
 .callout .btn.ink:hover:not([disabled]) { background: #F6CF6E; }
-.callout .btn .kbd { background: rgba(0, 0, 0, .12); }
+.callout .btn.ink .kbd { background: rgba(30, 30, 28, .12); color: var(--ink); opacity: .75; }
 .callout.bad { border-color: rgba(232, 131, 111, .5); }
 .callout .proj-tag { display: inline-flex; align-items: center; gap: 8px; padding: 4px 12px; border: 1px solid var(--line-2); border-radius: 999px; color: var(--text); }
 .p-row { display: grid; grid-template-columns: 10px 86px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 2px 0; }
