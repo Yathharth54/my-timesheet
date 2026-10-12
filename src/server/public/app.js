@@ -41,7 +41,8 @@ const state = {
   everhour: undefined, // undefined: still asking, null: couldn't read, number: hours
   saving: false, saveFailed: false, saveError: null, busy: null, toast: '', help: false,
   picked: new Set(), pickAnchor: null, // issues picked for a bulk change; `sel` stays the one in the editor
-  modal: null, modalReturn: null, // { kind: 'palette' | 'confirm' | 'assist', ... }
+  modal: null, modalReturn: null, // the confirm dialog
+  ask: null, askReturn: null, // Ask mode: chat on the left, receipt on the right
   openSel: null, selActive: 0,
   print: null, settings: null, settingsSaving: false, history: null, loadError: null,
 };
@@ -105,7 +106,7 @@ async function load(week) {
   const fresh = !state.draft || s.week !== state.week;
   if (s.week !== state.week) {
     state.sel = null; state.mergeFrom = null; state.armedDelete = null; state.adding = false; state.collapsed = new Set(); state.fed = false;
-    state.picked = new Set(); state.pickAnchor = null; state.modal = null;
+    state.picked = new Set(); state.pickAnchor = null; state.modal = null; state.ask = null;
     if (state.print && state.print.week !== s.week) state.print = null;
   }
   state.week = s.week; state.weeks = s.weeks; state.projects = s.projects; state.push = s.push; state.loadError = null;
@@ -404,26 +405,27 @@ async function removeRemote(ids) {
   }
 }
 
-// ---------- modal: confirm, command palette, Ask Claude ----------
+// ---------- confirm modal ----------
 function openModal(m) {
   if (!state.modal) state.modalReturn = document.activeElement?.id || null;
+  m.enter = true; // the entrance animation plays once, not on every re-render
   state.modal = m; state.help = false; state.openSel = null;
   render();
+  m.enter = false;
   focusModal();
 }
 function focusModal() {
   const m = state.modal;
   if (!m) return;
-  const want = m.kind === 'palette' ? '#paletteinput' : m.kind === 'assist' ? (m.status === 'answer' ? '#assist-apply' : m.status === 'thinking' ? '#assist-cancel' : '#assistinput') : m.focusCancel ? '#modal-cancel' : '#modal-ok';
-  (document.querySelector(want) ?? document.querySelector('.modal button'))?.focus();
+  (document.querySelector(m.focusCancel ? '#modal-cancel' : '#modal-ok') ?? document.querySelector('.modal button'))?.focus();
 }
 function closeModal() {
   const m = state.modal;
   if (!m || m.busy) return;
-  m.ctl?.abort();
   state.modal = null;
   render();
-  if (state.modalReturn) document.getElementById(state.modalReturn)?.focus();
+  const back = state.ask ? 'askinput' : state.modalReturn;
+  if (back) document.getElementById(back)?.focus();
 }
 async function runConfirm() {
   const m = state.modal;
@@ -435,19 +437,21 @@ async function runConfirm() {
   if (ok) closeModal(); else { render(); focusModal(); }
 }
 
+// ---------- Ask mode: chat on the left, the receipt on the right ----------
 const COMMANDS = [
   { id: 'itemise', label: 'Itemise hours', key: 'D', words: 'distribute split total', run: () => distribute(false) },
   { id: 'reweight', label: 'Estimate effort again and itemise', words: 'reweight weights re-estimate', run: () => distribute(true) },
   { id: 'print', label: 'Print to Linear and Everhour', key: 'P', words: 'push send', run: () => { state.tab = 'week'; requestPush(); } },
   { id: 'add', label: 'Add an issue by hand', key: 'a', words: 'new manual', run: () => { if (state.tab !== 'week') switchTab('week'); openAdd(); } },
   { id: 'pick-all', label: 'Pick every issue', words: 'select all bulk', run: () => { state.tab = 'week'; state.picked = new Set(live().map(i => i.id)); render(); } },
-  { id: 'week', label: 'This week', words: 'current receipt', run: () => switchTab('week') },
   { id: 'history', label: 'Past weeks', words: 'history', run: () => switchTab('history') },
   { id: 'settings', label: 'Settings', words: 'repos projects orgs reminder', run: () => switchTab('settings') },
   { id: 'help', label: 'Keyboard shortcuts', key: '?', words: 'help keys', run: () => { state.help = true; renderOverlay(); } },
 ];
-function paletteRows(q) {
+const EXAMPLES = ["Move Tuesday's issues to Dev - Internal", 'Merge the two QA issues', 'Give the spec review 2 hours'];
+function commandRows(q) {
   const t = q.trim().toLowerCase();
+  if (!t) return [];
   const rows = [];
   const wk = t.match(/^(?:go to )?week\s+(\d{4}-w\d{2}|last|this|next|previous|prev)$/);
   if (wk) {
@@ -457,57 +461,116 @@ function paletteRows(q) {
   }
   const words = c => `${c.label} ${c.words}`.toLowerCase().split(/[^a-z0-9?]+/);
   const tokens = t.split(/\s+/).filter(Boolean);
-  rows.push(...COMMANDS.filter(c => !tokens.length || tokens.every(tok => words(c).some(w => w.startsWith(tok)))));
-  if (t) {
-    const ask = { id: 'ask', label: 'Ask Claude', detail: q.trim(), run: () => askClaude(q.trim()) };
-    if (rows.length) rows.push(ask); else rows.unshift(ask);
-  }
-  return rows;
+  rows.push(...COMMANDS.filter(c => tokens.every(tok => words(c).some(w => w.startsWith(tok)))));
+  return rows.slice(0, 4);
 }
-function openPalette() {
-  if (!state.draft) return;
-  openModal({ kind: 'palette', q: '', active: 0 });
+/** A single word that starts a command runs it on Enter; anything else goes to Claude. */
+const defaultActive = q => (/^\S+$/.test(q.trim()) && commandRows(q).length ? 0 : -1);
+
+function openAsk() {
+  if (!state.draft || state.print) return;
+  if (state.ask) return $('#askinput')?.focus();
+  state.askReturn = { tab: state.tab };
+  state.tab = 'week'; state.help = false; state.openSel = null; state.adding = false;
+  state.ask = { turns: [], q: '', active: -1, status: 'idle', enter: true, pending: null };
+  render();
+  state.ask.enter = false;
+  $('#askinput')?.focus();
 }
-function runPaletteRow(k) {
-  const m = state.modal;
-  const row = paletteRows(m.q)[k];
+function closeAsk() {
+  const a = state.ask;
+  if (!a || a.status === 'applying') return;
+  a.ctl?.abort();
+  state.ask = null;
+  if (state.askReturn?.tab && state.askReturn.tab !== 'week') return switchTab(state.askReturn.tab);
+  render();
+}
+/** Re-renders only the suggestions under the input, so typing never repaints the page. */
+function renderAskSuggest() {
+  const el = $('#ask-suggest');
+  if (el) el.innerHTML = askSuggestHtml();
+}
+function askSuggestHtml() {
+  const a = state.ask;
+  const rows = commandRows(a.q);
+  if (!rows.length) return '';
+  return `<div class="ask-cmds" role="listbox" aria-label="Commands">${rows.map((r, k) => `<button class="ask-cmd ${k === a.active ? 'active' : ''}" data-act="ask-cmd" data-k="${k}" role="option" aria-selected="${k === a.active}"><span>${esc(r.label)}</span>${r.key ? `<span class="kbd">${esc(r.key)}</span>` : ''}</button>`).join('')}</div>`;
+}
+function runAskCommand(k) {
+  const row = commandRows(state.ask.q)[k];
   if (!row) return;
-  state.modal = null; render();
-  if (row.id !== 'ask' && state.modalReturn) document.getElementById(state.modalReturn)?.focus();
+  state.ask = null; render();
   row.run();
 }
-
-async function askClaude(message, turns = []) {
-  if (!message) return;
-  const m = { kind: 'assist', turns, message, status: 'thinking', reply: '', ops: [], summary: [], remote: [], rev: null, ctl: new AbortController() };
-  openModal(m);
-  if (!(await save())) { m.status = 'error'; m.reply = `Your edits aren't saved yet (${state.saveError ?? 'unknown error'}), so Claude would see an old week.`; render(); return focusModal(); }
-  try {
-    const r = await api('POST', '/api/assist', { week: state.week, message, history: turns.slice(-3) }, m.ctl.signal);
-    if (state.modal !== m) return;
-    Object.assign(m, { status: r.ops.length ? 'answer' : 'note', reply: r.reply, ops: r.ops, summary: r.summary, remote: r.remote, rev: r.rev });
-  } catch (e) {
-    if (e.name === 'AbortError' || state.modal !== m) return;
-    m.status = 'error'; m.reply = e.message;
+async function sendAsk(text) {
+  const a = state.ask;
+  const message = text.trim();
+  if (!a || !message || a.status === 'thinking' || a.status === 'applying') return;
+  const history = a.turns.filter(t => t.reply).slice(-3).map(t => ({ message: t.message, reply: t.reply }));
+  const turn = { message, reply: '', summary: [], remote: [], state: 'thinking' };
+  a.turns.push(turn); a.q = ''; a.active = -1; a.status = 'thinking'; a.pending = null;
+  a.ctl = new AbortController();
+  render();
+  const box = $('#askinput');
+  if (box) { box.value = ''; box.focus(); } // render() keeps typed text by default
+  if (!(await save())) {
+    Object.assign(turn, { state: 'error', reply: `Your edits aren't saved yet (${state.saveError ?? 'unknown error'}), so Claude would see an old week.` });
+    a.status = 'idle'; return render();
   }
-  render(); focusModal();
+  try {
+    const r = await api('POST', '/api/assist', { week: state.week, message, history }, a.ctl.signal);
+    if (state.ask !== a) return;
+    Object.assign(turn, { reply: r.reply, summary: r.summary, remote: r.remote, state: r.ops.length ? 'proposed' : 'note' });
+    a.pending = r.ops.length ? { ops: r.ops, rev: r.rev, turn } : null;
+    a.status = r.ops.length ? 'answer' : 'idle';
+  } catch (e) {
+    if (e.name === 'AbortError' || state.ask !== a) return;
+    Object.assign(turn, { state: 'error', reply: e.message });
+    a.status = 'idle';
+  }
+  render();
+  (a.status === 'answer' ? $('#ask-apply') : $('#askinput'))?.focus();
 }
-function followUp(text) {
-  const m = state.modal;
-  if (!text.trim() || m?.kind !== 'assist') return;
-  askClaude(text.trim(), [...m.turns, { message: m.message, reply: m.reply }]);
+function cancelAsk() {
+  const a = state.ask;
+  if (!a || a.status !== 'thinking') return;
+  a.ctl?.abort();
+  const turn = a.turns[a.turns.length - 1];
+  if (turn) Object.assign(turn, { state: 'cancelled', reply: 'Stopped.' });
+  a.status = 'idle'; render(); $('#askinput')?.focus();
 }
-async function applyAssist() {
-  const m = state.modal;
-  if (m?.kind !== 'assist' || m.status !== 'answer' || !m.ops.length) return;
-  m.status = 'applying'; m.busy = true; render();
-  const res = await bulk(m.ops, m.rev);
-  m.busy = false;
-  if (state.modal !== m) return;
-  if (!res) { m.status = 'answer'; render(); return focusModal(); }
-  state.modal = null; render();
+function discardAsk() {
+  const a = state.ask;
+  if (!a?.pending) return;
+  a.pending.turn.state = 'discarded';
+  a.pending = null; a.status = 'idle';
+  render(); $('#askinput')?.focus();
+}
+/** Applies Claude's changes, then goes back to the normal view. Deletes of printed issues still get their own confirm. */
+async function applyAsk() {
+  const a = state.ask;
+  if (!a?.pending || a.status !== 'answer') return;
+  a.status = 'applying'; render();
+  const res = await bulk(a.pending.ops, a.pending.rev);
+  if (state.ask !== a) return;
+  if (!res) { a.status = 'answer'; render(); return; }
+  state.ask = null;
+  render();
   if (res.remote.length) return requestDelete(res.remote);
   toast(`Done. ${res.summary.join('. ')}.`);
+}
+/** Which issues Claude's pending change touches, for the receipt preview. */
+function askPreview() {
+  const ops = state.ask?.pending?.ops;
+  if (!ops) return null;
+  const touched = new Set(), gone = new Set();
+  for (const o of ops) {
+    const ids = o.ids ?? (o.id ? [o.id] : []);
+    if (o.op === 'delete') ids.forEach(id => gone.add(id));
+    else if (o.op === 'merge') { touched.add(ids[0]); ids.slice(1).forEach(id => gone.add(id)); }
+    else ids.forEach(id => touched.add(id));
+  }
+  return { touched, gone };
 }
 
 // ---------- custom select ----------
@@ -559,11 +622,11 @@ function render() {
 function renderTop() {
   const failed = state.saveFailed && hasPending() && !state.saving;
   const busy = !failed && (state.saving || state.settingsSaving || hasPending());
-  const onWeek = state.tab === 'week' && !state.print;
+  const onWeek = state.tab === 'week' && !state.print && !state.ask;
   $('#top').innerHTML = `<div class="top-in">
     <span class="brand">my-timesheet</span>
     <span class="spacer"></span>
-    <nav class="tabs" aria-label="Sections">${[['week', 'This week'], ['history', 'Past weeks'], ['settings', 'Settings']].map(([k, l]) => `<button class="tab ${state.tab === k && !state.print ? 'on' : ''}" data-act="tab" data-k="${k}">${l}</button>`).join('')}</nav>
+    ${state.ask ? '' : `<nav class="tabs" aria-label="Sections">${[['week', 'This week'], ['history', 'Past weeks'], ['settings', 'Settings']].map(([k, l]) => `<button class="tab ${state.tab === k && !state.print ? 'on' : ''}" data-act="tab" data-k="${k}">${l}</button>`).join('')}</nav>`}
     ${onWeek && state.week ? `<div class="weeknav">
       <button class="icon-btn" data-act="prev" aria-label="Previous week">${PREV}</button>
       <span class="weeklabel" title="${esc(state.week)}">Week ${weekNo(state.week)}</span>
@@ -578,63 +641,73 @@ const HELP = [['j / k', 'next / previous issue'], ['e', 'edit the title'], ['p',
 function renderOverlay() {
   const help = state.help ? `<div class="overlay" role="dialog" aria-label="Keyboard shortcuts"><strong>Keyboard</strong><dl>${HELP.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl></div>` : '';
   $('#overlay').innerHTML = help + renderModal();
-  document.querySelector('.pal-row.active')?.scrollIntoView({ block: 'nearest' });
 }
 
 const SPARK = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0c.4 3.9 2.1 5.6 6 6-3.9.4-5.6 2.1-6 6-.4-3.9-2.1-5.6-6-6 3.9-.4 5.6-2.1 6-6Zm5 10c.2 1.9 1 2.8 3 3-2 .2-2.8 1-3 3-.2-2-1-2.8-3-3 2-.2 2.8-1.1 3-3Z"/></svg>';
 function renderModal() {
   const m = state.modal;
   if (!m) return '';
-  const inner = m.kind === 'palette' ? renderPalette(m) : m.kind === 'assist' ? renderAssist(m) : renderConfirm(m);
-  return `<div class="modal-back" data-act="modal-back"></div>
-    <div class="modal ${m.kind}${m.danger ? ' danger' : ''}" role="dialog" aria-modal="true" aria-labelledby="modal-title">${inner}</div>`;
+  return `<div class="modal-back ${m.enter ? 'enter' : ''}" data-act="modal-back"></div>
+    <div class="modal confirm ${m.danger ? 'danger' : ''} ${m.enter ? 'enter' : ''}" role="dialog" aria-modal="true" aria-labelledby="modal-title">${renderConfirm(m)}</div>`;
 }
 function renderConfirm(m) {
   return `<div class="m-head"><h2 id="modal-title">${esc(m.title)}</h2></div>
-    <div class="m-body">${m.body}${m.error ? `<div class="m-error" role="alert">${m.error.map(x => `<div>✗ ${esc(x)}</div>`).join('')}</div>` : ''}</div>
+    <div class="m-body">${m.body}${m.error ? `<div class="m-error" role="alert">${m.error.map(x => `<div>${esc(x)}</div>`).join('')}</div>` : ''}</div>
     <div class="m-foot">
-      <button class="paper-btn" id="modal-cancel" data-act="modal-cancel" ${m.busy ? 'disabled' : ''}>Cancel</button>
-      <button class="paper-btn solid ${m.danger ? 'danger' : ''}" id="modal-ok" data-act="modal-ok" ${m.busy ? 'disabled' : ''}>${m.busy ? 'Working…' : esc(m.ok)}</button>
+      <button class="m-btn" id="modal-cancel" data-act="modal-cancel" ${m.busy ? 'disabled' : ''}>Cancel</button>
+      <button class="m-btn solid ${m.danger ? 'danger' : ''}" id="modal-ok" data-act="modal-ok" ${m.busy ? 'disabled' : ''}>${m.busy ? 'Working…' : esc(m.ok)}</button>
     </div>`;
 }
-function renderPalette(m) {
-  const rows = paletteRows(m.q);
-  m.active = Math.min(m.active, Math.max(0, rows.length - 1));
-  const list = rows.map((r, k) => `<li class="pal-row ${k === m.active ? 'active' : ''} ${r.id === 'ask' ? 'ask' : ''}" role="option" id="pal-${k}" aria-selected="${k === m.active}" data-act="pal-run" data-k="${k}">
-      ${r.id === 'ask' ? `<span class="pal-ico">${SPARK}</span><span class="pal-l">Ask Claude <span class="pal-q">“${esc(r.detail)}”</span></span><span class="kbd">↵</span>` : `<span class="pal-l">${esc(r.label)}</span>${r.key ? `<span class="kbd">${esc(r.key)}</span>` : ''}`}
-    </li>`).join('');
-  return `<h2 id="modal-title" class="sr-only">Commands</h2>
-    <div class="pal-input"><svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="9" cy="9" r="6"/><path d="m13.5 13.5 4 4"/></svg><input id="paletteinput" value="${esc(m.q)}" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="true" aria-controls="pal-list" aria-activedescendant="pal-${m.active}" aria-label="Type a command or ask Claude" placeholder="Type a command, or ask Claude to change the week"></div>
-    <ul class="pal-list" id="pal-list" role="listbox">${list}</ul>
-    <div class="pal-foot">${m.q.trim() ? '' : '<span>Try <em>“move Tuesday\'s issues to Dev - Internal”</em></span>'}<span><span class="kbd">↑↓</span> move <span class="kbd">↵</span> run <span class="kbd">esc</span> close</span></div>`;
-}
-function renderAssist(m) {
-  const bubble = (who, text) => `<div class="a-turn ${who}"><span class="a-who">${who === 'you' ? 'You' : `${SPARK} Claude`}</span><div>${esc(text)}</div></div>`;
-  const past = m.turns.map(t => bubble('you', t.message) + bubble('claude', t.reply)).join('');
-  let now = '';
-  if (m.status === 'thinking') now = `<div class="a-turn claude"><span class="a-who">${SPARK} Claude</span><div class="a-wait">Reading your week<span class="dots"><i>.</i><i>.</i><i>.</i></span></div></div>`;
-  else if (m.status === 'error') now = `<div class="m-error" role="alert">✗ ${esc(m.reply)}</div>`;
-  else {
-    now = bubble('claude', m.reply || 'Here is what I would change.');
-    if (m.summary.length) now += `<div class="a-changes"><div class="a-label">Changes</div><ul>${m.summary.map(x => `<li>${esc(x)}</li>`).join('')}</ul>${m.remote.length ? `<div class="m-faint">${plural(m.remote.length, 'issue')} ${m.remote.length === 1 ? 'is' : 'are'} already in Linear. You confirm ${m.remote.length === 1 ? 'that delete' : 'those deletes'} next.</div>` : ''}</div>`;
-  }
-  const canType = m.status !== 'thinking' && m.status !== 'applying';
-  return `<div class="m-head"><h2 id="modal-title">${SPARK} Ask Claude</h2><span class="m-faint">Week ${weekNo(state.week)}</span><button class="m-x" data-act="modal-cancel" aria-label="Close" ${m.busy ? 'disabled' : ''}>×</button></div>
-    <div class="m-body a-log" data-keep-scroll="assist">${past}${bubble('you', m.message)}${now}</div>
-    ${canType ? `<div class="pal-input a-input"><input id="assistinput" autocomplete="off" spellcheck="false" aria-label="Reply to Claude" placeholder="${m.status === 'answer' ? 'Not quite? Say what to change' : 'Ask for something else'}"></div>` : ''}
-    <div class="m-foot a-foot">
-      <span class="m-faint">${m.status === 'thinking' ? 'This takes about 10 seconds.' : m.status === 'answer' || m.status === 'applying' ? 'Nothing changes until you apply it.' : ''}</span>
-      ${m.status === 'thinking' ? '<button class="paper-btn" id="assist-cancel" data-act="modal-cancel">Cancel</button>' : ''}
-      ${m.status === 'answer' || m.status === 'applying' ? `<button class="paper-btn" data-act="modal-cancel" ${m.busy ? 'disabled' : ''}>Discard</button><button class="paper-btn solid" id="assist-apply" data-act="assist-apply" ${m.busy ? 'disabled' : ''}>${m.status === 'applying' ? 'Applying…' : 'Apply'}</button>` : ''}
-      ${m.status === 'error' ? `<button class="paper-btn" id="assist-retry" data-act="assist-retry">Try again</button>` : ''}
-      ${m.status === 'note' ? '<button class="paper-btn" data-act="modal-cancel">Close</button>' : ''}
+
+const SEND = '<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5"/></svg>';
+function renderAsk() {
+  const a = state.ask;
+  const turns = a.turns.map(t => {
+    const you = `<div class="ask-you">${esc(t.message)}</div>`;
+    let them = '';
+    if (t.state === 'thinking') them = `<div class="ask-claude"><span class="ask-avatar">${SPARK}</span><div class="ask-text ask-wait">Reading your week<span class="dots"><i>.</i><i>.</i><i>.</i></span></div></div>`;
+    else if (t.state === 'error') them = `<div class="ask-claude"><span class="ask-avatar">${SPARK}</span><div class="ask-text ask-err">${esc(t.reply)}</div></div>`;
+    else {
+      const changes = t.summary.length ? `<div class="ask-changes ${t.state}">
+          <div class="ask-changes-head">${t.state === 'proposed' ? 'Proposed changes' : t.state === 'discarded' ? 'Discarded' : 'Changes'}</div>
+          <ul>${t.summary.map(x => `<li>${esc(x)}</li>`).join('')}</ul>
+          ${t.remote.length && t.state === 'proposed' ? `<p>${plural(t.remote.length, 'issue')} ${t.remote.length === 1 ? 'is' : 'are'} already in Linear. You confirm ${t.remote.length === 1 ? 'that delete' : 'those deletes'} next.</p>` : ''}
+          ${t.state === 'proposed' ? `<div class="ask-actions"><button class="btn solid" id="ask-apply" data-act="ask-apply" ${a.status === 'applying' ? 'disabled' : ''}>${a.status === 'applying' ? 'Applying…' : 'Apply changes'}</button><button class="btn ghost" data-act="ask-discard" ${a.status === 'applying' ? 'disabled' : ''}>Discard</button></div>` : ''}
+        </div>` : '';
+      them = `<div class="ask-claude"><span class="ask-avatar">${SPARK}</span><div class="ask-text">${esc(t.reply || 'Nothing to change.')}${changes}</div></div>`;
+    }
+    return you + them;
+  }).join('');
+  const intro = a.turns.length ? '' : `<div class="ask-intro">
+      <h1>What should change?</h1>
+      <p class="lede">Claude reads every issue in week ${weekNo(state.week)} and suggests edits. You see them on the receipt before anything changes.</p>
+      <div class="ask-examples">${EXAMPLES.map(x => `<button class="ask-example" data-act="ask-example" data-text="${esc(x)}">${esc(x)}</button>`).join('')}</div>
     </div>`;
+  const thinking = a.status === 'thinking';
+  return `<section class="ask ${a.enter ? 'enter' : ''}" aria-label="Ask Claude">
+      <div class="ask-head">
+        <span class="ask-title">${SPARK} Ask Claude</span>
+        <span class="faint">Week ${weekNo(state.week)}</span>
+        <span class="spacer"></span>
+        <button class="btn ghost" data-act="ask-close" ${a.status === 'applying' ? 'disabled' : ''}>Close <span class="kbd">esc</span></button>
+      </div>
+      <div class="ask-log" data-keep-scroll="ask" aria-live="polite">${intro}${turns}</div>
+      <div class="ask-compose">
+        <div id="ask-suggest">${askSuggestHtml()}</div>
+        <div class="ask-box">
+          <input id="askinput" value="${esc(a.q)}" autocomplete="off" spellcheck="false" aria-label="Ask Claude or type a command" placeholder="${a.pending ? 'Not quite? Say what to change' : 'Ask Claude, or type a command'}">
+          ${thinking ? '<button class="btn ghost" data-act="ask-cancel">Stop</button>' : `<button class="ask-send" data-act="ask-send" aria-label="Send">${SEND}</button>`}
+        </div>
+        <div class="ask-hint"><span><span class="kbd">↵</span> send</span><span><span class="kbd">↑↓</span> pick a command</span><span>Nothing changes until you apply it.</span></div>
+      </div>
+    </section>`;
 }
 
 function renderView() {
   if (state.loadError) { $('#view').innerHTML = `<div class="load-error">✗ ${esc(state.loadError)}</div>`; return; }
   if (!state.draft) return;
   if (state.print) return renderPrint();
+  if (state.ask) { $('#view').innerHTML = `<div class="ask-grid">${renderAsk()}${renderReceipt(false)}</div>`; return; }
   if (state.tab === 'history') return renderHistory();
   if (state.tab === 'settings') return renderSettings();
   renderWeek();
@@ -718,7 +791,7 @@ function renderReceipt(feed) {
   const billable = act.filter(i => kindOf(i.project) === 'billable').reduce((s, i) => s + (i.hours ?? 0), 0);
   const parentCount = new Set(act.filter(i => i.project).map(i => `${i.day}|${i.project}`)).size;
   const swatchFor = n => (n === 'No project' ? 'var(--bad-ink)' : color(n));
-  const showPrint = !d.pushed || unlogged().length > 0;
+  const showPrint = (!d.pushed || unlogged().length > 0) && !state.ask;
   return `
     <section class="col-receipt ${feed ? 'feed' : ''}" aria-label="Receipt">
       <div class="slot"></div>
@@ -730,7 +803,7 @@ function renderReceipt(feed) {
         </div>
         <div class="paper-scroll" data-keep-scroll="receipt">
           ${act.length ? groupedDays().map(renderDay).join('') : '<div class="empty">No issues yet.<br>Run <strong>/timesheet</strong> in Claude to draft this week, or add an issue by hand.</div>'}
-          ${state.adding ? renderAddForm() : '<div class="add-line"><button class="paper-btn" data-act="add">+ Add an issue by hand</button></div>'}
+          ${state.ask ? '' : state.adding ? renderAddForm() : '<div class="add-line"><button class="paper-btn" data-act="add">+ Add an issue by hand</button></div>'}
         </div>
         <div class="paper-foot">
           <div class="dash"></div>
@@ -764,7 +837,8 @@ function renderDay(day) {
 }
 
 function renderLine(i) {
-  const cls = ['r-line', i.id === state.sel ? 'sel' : '', i.project ? '' : 'unassigned', isPushed(i) ? 'pushed' : '', state.mergeFrom === i.id ? 'mark-merge' : ''].filter(Boolean).join(' ');
+  const pv = askPreview();
+  const cls = ['r-line', i.id === state.sel && !state.ask ? 'sel' : '', pv?.touched.has(i.id) ? 'pv-change' : '', pv?.gone.has(i.id) ? 'pv-gone' : '', i.project ? '' : 'unassigned', isPushed(i) ? 'pushed' : '', state.mergeFrom === i.id ? 'mark-merge' : ''].filter(Boolean).join(' ');
   const hours = `${isPushed(i) && i.linear.identifier ? `${esc(i.linear.identifier)} ` : ''}${i.locked ? '* ' : ''}${fmt(i.hours)}`;
   const picked = state.picked.has(i.id);
   return `<div class="r-row ${picked ? 'picked' : ''}"><button class="r-check" data-act="pick-toggle" data-id="${esc(i.id)}" role="checkbox" aria-checked="${picked}" aria-label="Pick ${esc(i.title)}"></button><button class="${cls}" data-act="pick" data-id="${esc(i.id)}" aria-pressed="${i.id === state.sel}" draggable="${!isFrozen(i)}">
@@ -1048,7 +1122,7 @@ function renderHistory() {
     <div class="page">
       <div class="page-head">
         <div><h1>Past weeks</h1><p class="lede">Every week you've drafted. Taller receipts are longer weeks.</p></div>
-        <div><div style="font-family:var(--mono);font-weight:700;font-size:30px">${fmt(avg)} h</div><div class="faint">average over ${plural(printed.length, 'printed week')}</div></div>
+        ${printed.length ? `<div><div style="font-family:var(--mono);font-weight:700;font-size:30px">${fmt(avg)} h</div><div class="faint">average over ${plural(printed.length, 'printed week')}</div></div>` : ''}
       </div>
       <div class="hist">
         ${weeks.length ? weeks.map((w, k) => {
@@ -1117,38 +1191,25 @@ function renderSettings() {
     if (r.project && !opts.some(o => o.v === r.project)) opts.push({ v: r.project, label: `Bills to ${r.project}`, color: color(r.project) });
     return opts;
   };
+  const seg = (opts, cur, act, k) => `<div class="seg">${opts.map(([v, l]) => `<button class="${cur === v ? 'on' : ''}" data-act="${act}" ${k != null ? `data-k="${k}"` : ''} data-c="${v}" data-v="${v === true ? 1 : v === false ? 0 : v}" aria-pressed="${cur === v}">${l}</button>`).join('')}</div>`;
+  const section = (title, about, body) => `<section class="set" aria-label="${esc(title)}"><div class="set-about"><h2>${title}</h2><p>${about}</p></div><div class="set-body">${body}</div></section>`;
+  const repos = s.repos.length ? s.repos.map((r, k) => `<div class="set-row">
+      <span class="repo-name" title="${esc(r.root)}">${r.class === 'work' && r.project ? `<span class="swatch" style="background:${color(r.project)}"></span>` : ''}<span>${esc(r.name ?? r.root)}</span></span>
+      ${seg([['work', 'Work'], ['personal', 'Personal'], ['ignore', 'Ignore']], r.class, 'repo-cls', k)}
+      ${r.class === 'work' ? `<div class="set-wide">${select(`repo-${k}`, repoOptions(r), r.project ?? '', v => { r.project = v || undefined; saveSettings(); }, { label: `Project for ${r.name ?? r.root}` })}</div>` : ''}
+    </div>`).join('') : '<p class="set-empty">No repos yet. They show up after your first Claude session in one.</p>';
+  const projects = s.projects.map((p, k) => `<div class="set-row">
+      <span class="repo-name"><span class="swatch" style="background:${color(p.name)}"></span><span>${esc(p.name)}</span></span>
+      <div class="proj-actions">${seg([['billable', 'Billable'], ['internal', 'Internal']], p.kind, 'proj-kind', k)}<button class="btn danger ${state.armedRemove === p.name ? 'armed' : ''}" data-act="proj-remove" data-k="${k}" aria-label="Remove ${esc(p.name)}">${state.armedRemove === p.name ? 'Press again' : 'Remove'}</button></div>
+    </div>`).join('');
   $('#view').innerHTML = `
-    <div class="page">
-    <div><h1>Settings</h1><p class="lede">What counts as work, where it bills, and when to remind you.</p></div>
-    <div class="settings">
-      <section class="slip" aria-label="Repos">
-        <h2>Repos</h2>
-        <p>Only work repos are logged. Repos in your work orgs count as work automatically; anything else is asked about once.</p>
-        ${s.repos.length ? s.repos.map((r, k) => `<div class="slip-row">
-          <div class="slip-row inline flat">
-            <span class="repo-name" title="${esc(r.root)}">${r.class === 'work' && r.project ? `<span class="swatch" style="background:${color(r.project)}"></span>` : ''}<span>${esc(r.name ?? r.root)}</span></span>
-            <div class="seg">${['work', 'personal', 'ignore'].map(c => `<button class="${r.class === c ? 'on' : ''}" data-act="repo-cls" data-k="${k}" data-c="${c}" aria-pressed="${r.class === c}">${c[0].toUpperCase() + c.slice(1)}</button>`).join('')}</div>
-          </div>
-          ${r.class === 'work' ? select(`repo-${k}`, repoOptions(r), r.project ?? '', v => { r.project = v || undefined; saveSettings(); }, { label: `Project for ${r.name ?? r.root}` }) : ''}
-        </div>`).join('') : '<p>No repos seen yet. They show up after your first Claude session in one.</p>'}
-      </section>
-      <div class="settings-col">
-        <section class="slip" aria-label="Projects">
-          <h2>Projects</h2>
-          ${s.projects.map((p, k) => `<div class="slip-row inline"><span class="repo-name"><span class="swatch" style="background:${color(p.name)}"></span><span>${esc(p.name)}</span></span><div class="proj-actions"><div class="seg">${['billable', 'internal'].map(c => `<button class="${p.kind === c ? 'on' : ''}" data-act="proj-kind" data-k="${k}" data-c="${c}" aria-pressed="${p.kind === c}">${c[0].toUpperCase() + c.slice(1)}</button>`).join('')}</div><button class="proj-remove ${state.armedRemove === p.name ? 'armed' : ''}" data-act="proj-remove" data-k="${k}" aria-label="Remove ${esc(p.name)}">${state.armedRemove === p.name ? 'Press again' : 'Remove'}</button></div></div>`).join('')}
-          <p>Removing a project only takes it off this list. Nothing changes in Linear or Everhour. To add a project, run <strong>timesheet init</strong> in a terminal.</p>
-        </section>
-        <section class="slip" aria-label="Work orgs">
-          <h2>Work orgs on GitHub</h2>
-          <label for="orgs">Comma-separated<input type="text" id="orgs" value="${esc(s.workOrgs.join(', '))}" autocomplete="off"></label>
-        </section>
-        <section class="slip" aria-label="Sunday reminder">
-          <h2>Sunday reminder</h2>
-          <div class="slip-row inline flat"><p>Claude mentions it once on Sunday evening or Monday if the week isn't printed.</p><div class="seg"><button class="${s.nudge ? 'on' : ''}" data-act="nudge" data-v="1" aria-pressed="${s.nudge}">On</button><button class="${!s.nudge ? 'on' : ''}" data-act="nudge" data-v="0" aria-pressed="${!s.nudge}">Off</button></div></div>
-        </section>
-        <p class="faint" style="margin:0">Your Linear and Everhour keys live in the macOS Keychain. To change them, run timesheet init in a terminal.</p>
-      </div>
-    </div>
+    <div class="page settings-page">
+      <div><h1>Settings</h1><p class="lede">What counts as work, where it bills, and when to remind you.</p></div>
+      ${section('Repos', 'Only work repos are logged. Repos in your work orgs count as work on their own; anything else is asked about once.', repos)}
+      ${section('Projects', 'Removing a project only takes it off this list. Linear and Everhour stay as they are. To add one, run <strong>timesheet init</strong>.', projects)}
+      ${section('Work orgs', 'GitHub orgs whose repos always count as work.', `<label class="sr-only" for="orgs">Work orgs, comma-separated</label><input type="text" class="set-input" id="orgs" value="${esc(s.workOrgs.join(', '))}" placeholder="TheAgenticAI, another-org" autocomplete="off"><span class="faint">Separate orgs with commas.</span>`)}
+      ${section('Sunday reminder', "Claude mentions it once on Sunday evening or Monday if the week isn't printed.", `<div class="set-row">${seg([[true, 'On'], [false, 'Off']], s.nudge, 'nudge')}</div>`)}
+      <p class="faint set-foot">Your Linear and Everhour keys live in the macOS Keychain. To change them, run timesheet init in a terminal.</p>
     </div>`;
 }
 
@@ -1187,9 +1248,13 @@ document.addEventListener('click', e => {
     case 'delete-pushed': if (it) requestDelete([it.id]); break;
     case 'modal-back': case 'modal-cancel': closeModal(); break;
     case 'modal-ok': runConfirm(); break;
-    case 'pal-run': runPaletteRow(+t.dataset.k); break;
-    case 'assist-apply': applyAssist(); break;
-    case 'assist-retry': { const m = state.modal; if (m?.kind === 'assist') askClaude(m.message, m.turns); break; }
+    case 'ask-cmd': runAskCommand(+t.dataset.k); break;
+    case 'ask-example': sendAsk(t.dataset.text); break;
+    case 'ask-send': sendAsk($('#askinput')?.value ?? ''); break;
+    case 'ask-cancel': cancelAsk(); break;
+    case 'ask-apply': applyAsk(); break;
+    case 'ask-discard': discardAsk(); break;
+    case 'ask-close': closeAsk(); break;
     case 'pick': {
       const id = t.dataset.id;
       if (e.shiftKey || e.metaKey || e.ctrlKey) { togglePick(id, e.shiftKey); break; }
@@ -1239,36 +1304,43 @@ document.addEventListener('submit', e => {
   submitAdd();
 });
 
-/** Keys while a modal is open: Esc closes, Tab stays inside, the palette moves with arrows and runs on Enter. */
+/** Keys while the confirm dialog is open: Esc closes and Tab stays inside. */
 function modalKey(e) {
-  const m = state.modal;
   if (e.key === 'Escape') { e.preventDefault(); return closeModal(); }
-  if (e.key === 'Tab') {
-    const f = [...document.querySelectorAll('.modal button:not([disabled]), .modal input')];
-    if (!f.length) return;
-    const k = f.indexOf(document.activeElement);
+  if (e.key !== 'Tab') return;
+  const f = [...document.querySelectorAll('.modal button:not([disabled])')];
+  if (!f.length) return;
+  const k = f.indexOf(document.activeElement);
+  e.preventDefault();
+  f[(k + (e.shiftKey ? -1 : 1) + f.length) % f.length].focus();
+}
+/** Keys in Ask mode: Esc stops or closes, arrows pick a command, Enter runs it or sends to Claude. */
+function askKey(e) {
+  const a = state.ask;
+  if (e.key === 'Escape') { e.preventDefault(); return a.status === 'thinking' ? cancelAsk() : closeAsk(); }
+  if (e.target.id !== 'askinput') return;
+  const n = commandRows(a.q).length;
+  if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && n) {
     e.preventDefault();
-    f[(k + (e.shiftKey ? -1 : 1) + f.length) % f.length].focus();
-    return;
+    a.active = e.key === 'ArrowDown' ? (a.active + 1 >= n ? -1 : a.active + 1) : (a.active <= -1 ? n - 1 : a.active - 1);
+    renderAskSuggest();
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    if (a.active >= 0) runAskCommand(a.active); else sendAsk(e.target.value);
   }
-  if (m.kind === 'palette' && e.target.id === 'paletteinput') {
-    const n = paletteRows(m.q).length;
-    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); m.active = (m.active + (e.key === 'ArrowDown' ? 1 : -1) + n) % Math.max(1, n); renderOverlay(); $('#paletteinput')?.focus(); }
-    else if (e.key === 'Enter') { e.preventDefault(); runPaletteRow(m.active); }
-    return;
-  }
-  if (m.kind === 'assist' && e.target.id === 'assistinput' && e.key === 'Enter') { e.preventDefault(); followUp(e.target.value); }
 }
 
 document.addEventListener('input', e => {
-  if (e.target.id !== 'paletteinput' || state.modal?.kind !== 'palette') return;
-  state.modal.q = e.target.value; state.modal.active = 0;
-  render();
+  if (e.target.id !== 'askinput' || !state.ask) return;
+  state.ask.q = e.target.value;
+  state.ask.active = defaultActive(e.target.value);
+  renderAskSuggest();
 });
 
 document.addEventListener('keydown', e => {
-  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); return state.modal?.kind === 'palette' ? closeModal() : openPalette(); }
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); return state.ask ? closeAsk() : openAsk(); }
   if (state.modal) return modalKey(e);
+  if (state.ask) return askKey(e);
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   const tag = e.target.tagName;
   if (state.openSel) {
@@ -1291,7 +1363,7 @@ document.addEventListener('keydown', e => {
     if (k === 'n' || k === 'Escape') { e.preventDefault(); toast('Not printed.'); return closePrint(); }
   }
   if (k === '?') { state.help = !state.help; return renderOverlay(); }
-  if (k === '/') { e.preventDefault(); return openPalette(); }
+  if (k === '/' || e.code === 'Slash') { e.preventDefault(); return openAsk(); }
   if (k === 'Escape') {
     if (state.help) { state.help = false; return renderOverlay(); }
     if (state.picked.size && !state.print) return clearPicked();
@@ -1336,7 +1408,7 @@ document.addEventListener('drop', e => {
 /** True while the person is typing somewhere a reload would wipe. */
 function isEditing() {
   const ae = document.activeElement;
-  return state.adding || !!state.openSel || !!state.modal || (!!ae && TEXT_TAGS.includes(ae.tagName));
+  return state.adding || !!state.openSel || !!state.modal || !!state.ask || (!!ae && TEXT_TAGS.includes(ae.tagName));
 }
 
 setInterval(async () => {
