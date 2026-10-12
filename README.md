@@ -23,11 +23,50 @@ npx my-timesheet init      # once: keys, projects, work orgs, hooks
   - The review server only listens on 127.0.0.1 and rejects cross-site requests.
 - **Push:** creates the parent issues and sub-issues in Linear. You click **Sync** once in Everhour (its API can't import new issues), and the hours are logged. Re-running is always safe. While a push runs, the week can't be edited.
 
-## Commands
+## In Claude: `/timesheet`
 
 | | |
 |---|---|
-| `timesheet review [--week last]` | open the review UI |
+| `/timesheet` | draft this week from your sessions and commits |
+| `/timesheet last` | draft last week |
+| `/timesheet 2026-W41` | draft a given week |
+| `/timesheet review` | open the review page for this week (`review last` or `review 2026-W41` for others) |
+| `/timesheet repo work --project Boxsy` | mark the current repo as work, billed to a project (`repo personal`, `repo ignore`) |
+| `/timesheet move Tuesday's issues to Dev - Internal` | any change in plain words. Claude edits the week through `timesheet edit`, and asks before deleting anything already in Linear |
+
+Recurring work (a standup, a team sync, a client call) is one Linear issue logged on several days. Ask for it in plain words ("log the team sync on Tuesday and Thursday too"), or use Copy in the review page.
+
+## In the review page
+
+Press `/` or ⌘K for Ask Claude and the command list: Itemise hours, Estimate effort again, Print, Add an issue, Copy the issue to other days, Pick every issue, Past weeks, Settings, Keyboard shortcuts, and `week last`, `week next` or `week 2026-W40` to jump. Anything else you type goes to Claude, which previews its changes on the receipt before you apply them.
+
+| Key | |
+|---|---|
+| `j` / `k` | next / previous issue |
+| `e` | edit the title |
+| `p` | next project |
+| `[` / `]` | half an hour less / more (locks the hours) |
+| `L` | lock or unlock hours |
+| `c` | copy the issue to other days (stays one Linear issue) |
+| `s` | split in two |
+| `m` | mark, then `m` on another issue to merge |
+| `d d` | delete the issue |
+| `x` | pick the issue for bulk changes (shift-click picks a range) |
+| `a` | add an issue (several days and hours at once) |
+| `D` | itemise hours |
+| `P` | print to Linear and Everhour |
+| `/` or ⌘K | Ask Claude and commands |
+| `?` | show the shortcuts |
+| `Esc` | close, or clear picked issues |
+
+Picked issues get a bar at the bottom: move to a project or day, copy to more days, merge, delete.
+
+## In the terminal
+
+| | |
+|---|---|
+| `npx my-timesheet init` | first setup: keys, projects, work orgs, hooks |
+| `timesheet review [--week last]` | open the review page |
 | `timesheet push [--week last]` | push from the terminal |
 | `timesheet status` | one-line summary |
 | `timesheet show [--week last]` | the week as JSON, with issue ids |

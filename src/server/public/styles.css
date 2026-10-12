@@ -214,6 +214,10 @@ button.check:hover span:last-child { text-decoration: underline; text-decoration
 .actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
 .actions .wide { flex-basis: 100%; }
 .actions .faint { flex-basis: 100%; }
+/* the editor's actions: every button spans the column, Copy and Split share a row */
+.ed-actions { display: flex; flex-direction: column; gap: 12px; }
+.ed-pair { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 12px; }
+.ed-actions .btn { width: 100%; justify-content: center; }
 .linear-id { font-family: var(--mono); font-weight: 700; }
 .ed-empty { padding-top: 8px; display: flex; flex-direction: column; gap: 8px; }
 

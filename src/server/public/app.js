@@ -1092,12 +1092,16 @@ function renderEditor() {
         <span class="faint" style="margin-top:8px">${it.weight != null ? `Effort ${Math.round(it.weight * 10) / 10} of 10${it.weightReason ? `: ${esc(it.weightReason)}` : ''}.` : 'Effort not estimated yet.'}</span>
       </div>
       <div class="divider"></div>
-      ${frozen ? `<div class="actions"><button class="btn" data-act="copy">Copy to other days <span class="kbd">c</span></button><span class="spacer"></span><button class="btn danger" data-act="delete-pushed">${multi ? 'Delete this day' : 'Delete issue'}</button></div>
-        <span class="faint" style="margin-top:12px;display:block">${multi ? "Delete clears this day's hours in Everhour. The Linear issue stays for its other days." : "Delete moves it to Linear's trash and clears its Everhour time. You confirm first."}</span>` : `<div class="actions">
-        ${multi ? '' : `<div class="wide">${select('ed-merge', others.map(o => ({ v: o.id, label: o.title, hint: shortDay(o.day), color: o.project ? color(o.project) : 'var(--bad-ink)' })), null, v => mergeInto(it.id, v), { placeholder: 'Merge another issue into this one', label: 'Merge another issue into this one', disabled: !others.length })}</div>`}
+      ${frozen ? `<div class="ed-actions">
         <button class="btn" data-act="copy">Copy to other days <span class="kbd">c</span></button>
-        ${multi ? '' : '<button class="btn" data-act="split">Split in two <span class="kbd">s</span></button>'}
-        <span class="spacer"></span>
+        <button class="btn danger" data-act="delete-pushed">${multi ? 'Delete this day' : 'Delete issue'}</button>
+        <span class="faint">${multi ? "Delete clears this day's hours in Everhour. The Linear issue stays for its other days." : "Delete moves it to Linear's trash and clears its Everhour time. You confirm first."}</span>
+      </div>` : `<div class="ed-actions">
+        ${multi ? '' : select('ed-merge', others.map(o => ({ v: o.id, label: o.title, hint: shortDay(o.day), color: o.project ? color(o.project) : 'var(--bad-ink)' })), null, v => mergeInto(it.id, v), { placeholder: 'Merge another issue into this one', label: 'Merge another issue into this one', disabled: !others.length })}
+        <div class="ed-pair">
+          <button class="btn" data-act="copy">Copy to other days <span class="kbd">c</span></button>
+          ${multi ? '' : '<button class="btn" data-act="split">Split in two <span class="kbd">s</span></button>'}
+        </div>
         <button class="btn danger ${state.armedDelete === it.id ? 'armed' : ''}" data-act="delete">${state.armedDelete === it.id ? 'Press again to delete' : multi ? 'Delete this day' : 'Delete issue'}</button>
       </div>`}
     </section>`;
