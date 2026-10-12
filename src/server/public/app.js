@@ -37,7 +37,6 @@ const state = {
   week: new URLSearchParams(location.search).get('week'),
   draft: null, base: null, weeks: [], projects: [], warnings: [], push: { status: 'idle' },
   tab: 'week', sel: null, mergeFrom: null, armedDelete: null, collapsed: new Set(), flash: new Set(), fed: false,
-  adding: false, addProject: null, addDay: null,
   everhour: undefined, // undefined: still asking, null: couldn't read, number: hours
   saving: false, saveFailed: false, saveError: null, busy: null, toast: '', help: false,
   picked: new Set(), pickAnchor: null, // issues picked for a bulk change; `sel` stays the one in the editor
@@ -105,7 +104,7 @@ async function load(week) {
   const s = await api('GET', `/api/state${week ? `?week=${week}` : ''}`);
   const fresh = !state.draft || s.week !== state.week;
   if (s.week !== state.week) {
-    state.sel = null; state.mergeFrom = null; state.armedDelete = null; state.adding = false; state.collapsed = new Set(); state.fed = false;
+    state.sel = null; state.mergeFrom = null; state.armedDelete = null; state.collapsed = new Set(); state.fed = false;
     state.picked = new Set(); state.pickAnchor = null; state.modal = null; state.ask = null;
     if (state.print && state.print.week !== s.week) state.print = null;
   }
@@ -173,6 +172,9 @@ function save() {
   clearTimeout(retryTimer);
   if (inflight) return inflight;
   inflight = (async () => {
+    // Without this, a call with nothing pending finishes synchronously: the finally below clears `inflight`
+    // before the assignment above lands, `inflight` keeps a settled promise forever and no edit is ever saved again.
+    await null;
     let ok = true;
     try {
       for (let round = 0; ok && hasPending() && round < 3; round++) ok = await saveOnce();
@@ -277,19 +279,29 @@ function selectLine(id, scroll = true) {
   render();
   if (scroll) document.querySelector(`.r-line[data-id="${CSS.escape(id)}"]`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
+/** Opens the add-issue sheet. What you type lives on the modal, so picking a project or day never clears it. */
 function openAdd() {
-  if (state.tab !== 'week' || state.print) return;
-  state.adding = true; state.addProject = null; state.addDay = null; render();
+  if (!state.draft || state.print) return;
+  if (state.tab !== 'week') { state.tab = 'week'; state.fed = false; }
+  const days = state.draft.days.length ? [...state.draft.days].sort() : weekDays(state.week);
+  const selDay = findItem(state.sel)?.day;
+  openModal({
+    kind: 'add', title: '', desc: '', error: null,
+    project: findItem(state.sel)?.project ?? projectNames()[0] ?? null,
+    day: days.includes(selDay) ? selDay : days[0],
+  });
   $('#add-title')?.focus();
 }
 async function submitAdd() {
-  const title = $('#add-title').value.trim();
-  if (!title) return toast('Give the issue a title.');
-  const days = state.draft.days.length ? state.draft.days : weekDays(state.week);
+  const m = state.modal;
+  if (m?.kind !== 'add' || m.busy) return;
+  if (!m.title.trim()) { m.error = 'Give the issue a title.'; render(); return $('#add-title')?.focus(); }
+  m.busy = true; m.error = null; render();
   const before = new Set(state.draft.items.map(i => i.id));
-  const d = await act('/api/items', { title, description: $('#add-desc').value, project: state.addProject ?? projectNames()[0] ?? null, day: state.addDay ?? findItem(state.sel)?.day ?? days[0] });
-  if (!d) return;
-  state.adding = false;
+  const d = await act('/api/items', { title: m.title, description: m.desc, project: m.project, day: m.day });
+  m.busy = false;
+  if (!d) { render(); return; }
+  state.modal = null;
   state.sel = d.items.find(i => !before.has(i.id))?.id ?? state.sel;
   render(); toast('Issue added. Press Itemise to give it hours.');
 }
@@ -417,7 +429,8 @@ function openModal(m) {
 function focusModal() {
   const m = state.modal;
   if (!m) return;
-  (document.querySelector(m.focusCancel ? '#modal-cancel' : '#modal-ok') ?? document.querySelector('.modal button'))?.focus();
+  const want = m.kind === 'add' ? '#add-title' : m.focusCancel ? '#modal-cancel' : '#modal-ok';
+  (document.querySelector(want) ?? document.querySelector('.modal button'))?.focus();
 }
 function closeModal() {
   const m = state.modal;
@@ -471,7 +484,7 @@ function openAsk() {
   if (!state.draft || state.print) return;
   if (state.ask) return $('#askinput')?.focus();
   state.askReturn = { tab: state.tab };
-  state.tab = 'week'; state.help = false; state.openSel = null; state.adding = false;
+  state.tab = 'week'; state.help = false; state.openSel = null;
   state.ask = { turns: [], q: '', active: -1, status: 'idle', enter: true, pending: null };
   render();
   state.ask.enter = false;
@@ -648,7 +661,33 @@ function renderModal() {
   const m = state.modal;
   if (!m) return '';
   return `<div class="modal-back ${m.enter ? 'enter' : ''}" data-act="modal-back"></div>
-    <div class="modal confirm ${m.danger ? 'danger' : ''} ${m.enter ? 'enter' : ''}" role="dialog" aria-modal="true" aria-labelledby="modal-title">${renderConfirm(m)}</div>`;
+    <div class="modal ${m.kind} ${m.danger ? 'danger' : ''} ${m.enter ? 'enter' : ''}" role="dialog" aria-modal="true" aria-labelledby="modal-title">${m.kind === 'add' ? renderAddModal(m) : renderConfirm(m)}</div>`;
+}
+function renderAddModal(m) {
+  const days = weekDays(state.week);
+  return `<form id="addform" novalidate>
+    <div class="m-head"><h2 id="modal-title">Add an issue</h2><p class="m-sub">For work that left no commits or Claude sessions, like a call or a review.</p></div>
+    <div class="m-body m-form">
+      <div class="m-field">
+        <label for="add-title">Title</label>
+        <input id="add-title" class="m-input" value="${esc(m.title)}" placeholder="Two or three words, like Client sync" autocomplete="off" ${m.error ? 'aria-invalid="true" aria-describedby="add-err"' : ''}>
+        ${m.error ? `<span class="m-field-err" id="add-err" role="alert">${esc(m.error)}</span>` : ''}
+      </div>
+      <div class="m-field">
+        <label for="add-desc">What you did</label>
+        <textarea id="add-desc" class="m-input" rows="3" placeholder="Two to four sentences. This becomes the Linear description.">${esc(m.desc)}</textarea>
+      </div>
+      <div class="m-two">
+        <div class="m-field"><span class="m-label">Project</span>${select('add-project', projectOptions(), m.project, v => { m.project = v; }, { label: 'Project' })}</div>
+        <div class="m-field"><span class="m-label">Day</span>${select('add-day', days.map(x => ({ v: x, label: dname(x), hint: state.draft.days.includes(x) ? '' : 'not counted' })), m.day, v => { m.day = v; }, { label: 'Day' })}</div>
+      </div>
+    </div>
+    <div class="m-foot">
+      <span class="m-faint m-foot-note">Itemise gives it hours afterwards.</span>
+      <button type="button" class="m-btn" id="modal-cancel" data-act="modal-cancel" ${m.busy ? 'disabled' : ''}>Cancel</button>
+      <button type="submit" class="m-btn solid" id="modal-ok" ${m.busy ? 'disabled' : ''}>${m.busy ? 'Adding…' : 'Add issue'}</button>
+    </div>
+  </form>`;
 }
 function renderConfirm(m) {
   return `<div class="m-head"><h2 id="modal-title">${esc(m.title)}</h2></div>
@@ -803,7 +842,7 @@ function renderReceipt(feed) {
         </div>
         <div class="paper-scroll" data-keep-scroll="receipt">
           ${act.length ? groupedDays().map(renderDay).join('') : '<div class="empty">No issues yet.<br>Run <strong>/timesheet</strong> in Claude to draft this week, or add an issue by hand.</div>'}
-          ${state.ask ? '' : state.adding ? renderAddForm() : '<div class="add-line"><button class="paper-btn" data-act="add">+ Add an issue by hand</button></div>'}
+          ${state.ask ? '' : '<div class="add-line"><button class="paper-btn" data-act="add">+ Add an issue by hand <span class="kbd">a</span></button></div>'}
         </div>
         <div class="paper-foot">
           <div class="dash"></div>
@@ -843,20 +882,6 @@ function renderLine(i) {
   const picked = state.picked.has(i.id);
   return `<div class="r-row ${picked ? 'picked' : ''}"><button class="r-check" data-act="pick-toggle" data-id="${esc(i.id)}" role="checkbox" aria-checked="${picked}" aria-label="Pick ${esc(i.title)}"></button><button class="${cls}" data-act="pick" data-id="${esc(i.id)}" aria-pressed="${i.id === state.sel}" draggable="${!isFrozen(i)}">
     <span class="t">${esc(i.title)}</span><span class="lead"></span><span class="h ${state.flash.has(i.id) ? 'flash' : ''}">${hours}</span></button></div>`;
-}
-
-function renderAddForm() {
-  const days = state.draft.days.length ? [...state.draft.days].sort() : weekDays(state.week);
-  const dayNow = state.addDay ?? (days.includes(findItem(state.sel)?.day) ? findItem(state.sel).day : days[0]);
-  return `<form class="add-form" id="addform">
-    <input id="add-title" placeholder="Title, 2 to 3 words" required aria-label="Title" autocomplete="off">
-    <input id="add-desc" placeholder="What you did" aria-label="What you did" autocomplete="off">
-    <div class="two">
-      <div>${select('add-project', projectOptions(), state.addProject ?? projectNames()[0], v => { state.addProject = v; }, { paper: true, label: 'Project' })}</div>
-      <div>${select('add-day', days.map(x => ({ v: x, label: dname(x) })), dayNow, v => { state.addDay = v; }, { paper: true, label: 'Day' })}</div>
-    </div>
-    <div class="two"><button class="paper-btn solid" type="submit">Add issue</button><button class="paper-btn" type="button" data-act="cancel-add">Cancel</button></div>
-  </form>`;
 }
 
 function renderEditor() {
@@ -1246,7 +1271,8 @@ document.addEventListener('click', e => {
     case 'bulk-delete': { const its = pickedItems(); if (its.length === 1 && !isFrozen(its[0])) { act('/api/delete', { id: its[0].id }).then(d => d && toast("Issue deleted. /timesheet won't redraft it.")); } else requestDelete(its.map(i => i.id)); break; }
     case 'bulk-clear': clearPicked(); break;
     case 'delete-pushed': if (it) requestDelete([it.id]); break;
-    case 'modal-back': case 'modal-cancel': closeModal(); break;
+    case 'modal-back': if (state.modal?.kind === 'add' && (state.modal.title.trim() || state.modal.desc.trim())) break; closeModal(); break; // a stray click shouldn't lose what was typed
+    case 'modal-cancel': closeModal(); break;
     case 'modal-ok': runConfirm(); break;
     case 'ask-cmd': runAskCommand(+t.dataset.k); break;
     case 'ask-example': sendAsk(t.dataset.text); break;
@@ -1271,7 +1297,6 @@ document.addEventListener('click', e => {
     case 'split': splitLine(it); break;
     case 'delete': deleteLine(it); break;
     case 'add': openAdd(); break;
-    case 'cancel-add': state.adding = false; render(); break;
     case 'print': requestPush(); break;
     case 'print-go': startPush(false); break;
     case 'print-anyway': case 'synced': startPush(true); break;
@@ -1308,7 +1333,7 @@ document.addEventListener('submit', e => {
 function modalKey(e) {
   if (e.key === 'Escape') { e.preventDefault(); return closeModal(); }
   if (e.key !== 'Tab') return;
-  const f = [...document.querySelectorAll('.modal button:not([disabled])')];
+  const f = [...document.querySelectorAll('.modal button:not([disabled]), .modal input, .modal textarea')];
   if (!f.length) return;
   const k = f.indexOf(document.activeElement);
   e.preventDefault();
@@ -1331,6 +1356,12 @@ function askKey(e) {
 }
 
 document.addEventListener('input', e => {
+  const m = state.modal;
+  if (m?.kind === 'add' && (e.target.id === 'add-title' || e.target.id === 'add-desc')) {
+    m[e.target.id === 'add-title' ? 'title' : 'desc'] = e.target.value;
+    if (m.error && m.title.trim()) { m.error = null; e.target.removeAttribute('aria-invalid'); document.getElementById('add-err')?.remove(); }
+    return;
+  }
   if (e.target.id !== 'askinput' || !state.ask) return;
   state.ask.q = e.target.value;
   state.ask.active = defaultActive(e.target.value);
@@ -1339,20 +1370,23 @@ document.addEventListener('input', e => {
 
 document.addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); return state.ask ? closeAsk() : openAsk(); }
-  if (state.modal) return modalKey(e);
-  if (state.ask) return askKey(e);
-  if (e.metaKey || e.ctrlKey || e.altKey) return;
   const tag = e.target.tagName;
-  if (state.openSel) {
+  if (state.openSel && !e.metaKey && !e.ctrlKey && !e.altKey) {
     const s = SELS[state.openSel];
     if (!s) { state.openSel = null; return; }
     if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); state.selActive = (state.selActive + (e.key === 'ArrowDown' ? 1 : -1) + s.options.length) % Math.max(1, s.options.length); render(); }
     else if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pickSel(state.openSel, state.selActive); }
-    else if (e.key === 'Escape' || e.key === 'Tab') { const id = state.openSel; state.openSel = null; render(); document.getElementById(id)?.focus(); }
+    else if (e.key === 'Escape' || e.key === 'Tab') { e.preventDefault(); const id = state.openSel; state.openSel = null; render(); document.getElementById(id)?.focus(); }
     return;
   }
+  if (state.modal) {
+    if (e.target.classList?.contains('sel-btn') && (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); state.openSel = e.target.id; state.selActive = 0; return render(); }
+    return modalKey(e);
+  }
+  if (state.ask) return askKey(e);
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (TEXT_TAGS.includes(tag)) {
-    if (e.key === 'Escape') { if (e.target.closest('#addform')) { state.adding = false; render(); } else e.target.blur(); }
+    if (e.key === 'Escape') e.target.blur();
     if (e.key === 'Enter' && tag === 'INPUT' && e.target.closest('.col-editor, .col-setup')) e.target.blur();
     return;
   }
@@ -1408,7 +1442,7 @@ document.addEventListener('drop', e => {
 /** True while the person is typing somewhere a reload would wipe. */
 function isEditing() {
   const ae = document.activeElement;
-  return state.adding || !!state.openSel || !!state.modal || !!state.ask || (!!ae && TEXT_TAGS.includes(ae.tagName));
+  return !!state.openSel || !!state.modal || !!state.ask || (!!ae && TEXT_TAGS.includes(ae.tagName));
 }
 
 setInterval(async () => {

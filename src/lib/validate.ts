@@ -12,7 +12,7 @@ export function validate(draft: Draft, projectNames: string[]): Warning[] {
     if (i.linear?.created) continue;
     if (!i.project) w.push({ level: 'block', code: 'no_project', message: `"${i.title}" has no project.`, itemId: i.id });
     else if (!projectNames.includes(i.project)) w.push({ level: 'block', code: 'unknown_project', message: `"${i.title}" uses unknown project "${i.project}".`, itemId: i.id });
-    if (i.hours == null) w.push({ level: 'block', code: 'no_hours', message: `"${i.title}" has no hours. Press Distribute.`, itemId: i.id });
+    if (i.hours == null) w.push({ level: 'block', code: 'no_hours', message: `"${i.title}" has no hours. Press Itemise.`, itemId: i.id });
     else if (i.hours > MAX_ITEM_HOURS) w.push({ level: 'block', code: 'over_cap', message: `"${i.title}" is ${i.hours}h; the limit is ${MAX_ITEM_HOURS}h per sub-issue.`, itemId: i.id });
     if (!draft.days.includes(i.day)) w.push({ level: 'block', code: 'day_not_counted', message: `"${i.title}" is on ${i.day}, which isn't a counted day.`, itemId: i.id });
     if (HOURS_IN_TEXT.test(i.title) || HOURS_IN_TEXT.test(i.description)) w.push({ level: 'warn', code: 'hours_in_text', message: `"${i.title}" mentions hours in its text.`, itemId: i.id });

@@ -319,6 +319,35 @@ button.check:hover span:last-child { text-decoration: underline; text-decoration
 .m-btn.solid.danger:hover:not([disabled]) { background: #9B1C13; border-color: #9B1C13; }
 .m-btn[disabled] { opacity: .5; cursor: not-allowed; }
 
+/* add-issue sheet */
+.modal.add { width: min(560px, calc(100% - 32px)); overflow: visible; max-height: none; top: 12vh; }
+.modal.add .m-body { overflow: visible; }
+.m-sub { margin: 6px 0 0; color: var(--ink-2); font-size: 14px; line-height: 1.5; }
+.m-form { display: flex; flex-direction: column; gap: 20px; padding-top: 20px; }
+.m-field { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.m-field > label, .m-label { font-size: 13px; font-weight: 600; color: var(--ink); }
+.m-input { width: 100%; padding: 10px 14px; border: 1px solid var(--paper-3); border-radius: 10px; background: #FFFFFF; color: var(--ink); font: inherit; font-size: 15px; line-height: 1.5; transition: border-color .15s, box-shadow .15s; }
+input.m-input { height: 44px; }
+textarea.m-input { resize: vertical; min-height: 88px; }
+.m-input::placeholder { color: #A8A79F; }
+.m-input:focus { outline: none; border-color: var(--ink); box-shadow: 0 0 0 3px rgba(30, 30, 28, .08); }
+.m-input[aria-invalid="true"] { border-color: var(--bad-ink); }
+.m-field-err { color: var(--bad-ink); font-size: 13px; }
+.m-two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.m-two > div:last-child .sel-list { left: auto; right: 0; }
+.modal .sel-btn { height: 44px; border-color: var(--paper-3); border-radius: 10px; background: #FFFFFF; color: var(--ink); }
+.modal .sel-btn:hover:not([disabled]) { background: #FFFFFF; border-color: #CFCBBC; }
+.modal .sel-btn[aria-expanded="true"] { border-color: var(--ink); box-shadow: 0 0 0 3px rgba(30, 30, 28, .08); }
+.modal .sel-btn svg { color: var(--ink-2); }
+.modal .sel-list { background: #FFFFFF; color: var(--ink); box-shadow: 0 0 0 1px var(--paper-3), 0 16px 40px rgba(0, 0, 0, .18); }
+.modal .sel-opt.active { background: var(--paper-2); }
+.modal .sel-opt .hint { color: var(--ink-2); }
+.modal .sel-opt[aria-selected="true"]::after { color: var(--ink); }
+.modal.add .m-foot { border-top: 1px solid var(--paper-3); margin-top: 8px; padding-top: 20px; border-radius: 0 0 16px 16px; }
+.m-foot-note { margin-right: auto; }
+@media (max-width: 560px) { .m-two { grid-template-columns: minmax(0, 1fr); } .m-foot-note { display: none; } }
+.add-line .paper-btn .kbd { background: var(--paper-2); color: var(--ink-2); margin-left: 6px; }
+
 /* Ask mode: the chat takes the left half, the receipt stays on the right */
 .ask-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 48px; align-items: start; padding-top: 32px; }
 @media (max-width: 960px) { .ask-grid { grid-template-columns: minmax(0, 1fr); } .ask-grid .col-receipt { height: 70vh; } }
