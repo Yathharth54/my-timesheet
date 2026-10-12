@@ -1,6 +1,6 @@
 ---
 name: timesheet
-description: Drafts the weekly my-timesheet worksheet (Linear parent issues and sub-issues) from this week's indexed Claude Code sessions and git commits. Use when the user runs /timesheet or asks to draft, update or redo their timesheet or worklog for a week.
+description: Drafts the weekly my-timesheet worksheet (Linear parent issues and sub-issues) from this week's indexed Claude Code sessions and git commits, and changes a drafted week on request. Use when the user runs /timesheet or asks to draft, update, redo or change their timesheet or worklog for a week (move issues to another project or day, rename, merge, delete).
 ---
 
 # Drafting a my-timesheet week
@@ -64,3 +64,19 @@ For every (day, project) pair that has items, propose a parent:
 - description `## YYYY-MM-DD` followed by a blank line and a 2–3 sentence summary.
 
 Don't write the sub-task count; code adds it.
+
+## Changing a week
+
+When the user asks to change issues in a drafted week ("move all of these to Dev - Internal", "delete the duplicate", "merge Tuesday's QA issues"):
+
+1. Run `timesheet show --week <w>`. It prints the week as JSON: every issue with its `id`, and `inLinear` (the Linear identifier once pushed).
+2. Write the changes as ops to a file in your scratchpad, then run `timesheet edit --week <w> --ops <file>`. Ops:
+   - `{"op":"set","ids":["..."],"project":"Dev - Internal"}`, and/or `"day":"YYYY-MM-DD"`; `"title"` or `"description"` only with one id;
+   - `{"op":"hours","id":"...","hours":1.5}`;
+   - `{"op":"merge","ids":["first","second"]}` (all merge into the first);
+   - `{"op":"delete","ids":["..."]}`.
+3. Relay the lines it prints. An open review tab picks the change up by itself.
+
+**Never edit `draft.json` or any other file under `~/.timesheet/` by hand.** `edit` checks ids, takes the week lock so it can't clash with a push, and logs the user's corrections so later drafts learn from them.
+
+Pushed issues (`inLinear` set) can only be deleted. `edit` holds those back and lists them. Deleting them trashes the issue in Linear (restorable for 30 days) and clears its hours in Everhour, so **ask the user first and name each issue**. Only after they say yes, run the same command again with `--remote`.

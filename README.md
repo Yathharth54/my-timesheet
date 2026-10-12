@@ -30,8 +30,10 @@ npx my-timesheet init      # once: keys, projects, work orgs, hooks
 | `timesheet review [--week last]` | open the review UI |
 | `timesheet push [--week last]` | push from the terminal |
 | `timesheet status` | one-line summary |
+| `timesheet show [--week last]` | the week as JSON, with issue ids |
+| `timesheet edit --ops changes.json [--remote]` | apply changes (move, rename, merge, delete); `--remote` also deletes pushed issues from Linear and Everhour |
 | `timesheet repo work --project Boxsy` | classify the current repo |
 | `timesheet doctor` | check keys, hooks and tools |
 | `timesheet uninstall [--purge]` | remove hooks (and data) |
 
-Keys live in the macOS Keychain. Everything else is in `~/.timesheet/`. Nothing is written to Linear or Everhour until you push. Before that, Distribute sends item titles, descriptions and evidence counts to Claude via `claude -p`, and the review page reads your week's Everhour total.
+Keys live in the macOS Keychain. Everything else is in `~/.timesheet/`. Nothing is written to Linear or Everhour until you push, or until you confirm deleting a pushed issue (it goes to Linear's trash and its Everhour time is cleared). Before that, Distribute sends item titles, descriptions and evidence counts to Claude via `claude -p`, Ask Claude in the review page (press `/` or ⌘K) sends the week's issues to Claude the same way; its suggestions only apply when you press Apply. The review page also reads your week's Everhour total.

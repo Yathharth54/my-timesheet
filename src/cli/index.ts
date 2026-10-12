@@ -9,6 +9,10 @@ const HELP = `timesheet — turn your week into Linear issues + Everhour time
   timesheet review [--week W]          open the review UI (default: this week)
   timesheet push [--week W]            push the week to Linear and Everhour
   timesheet status [--week W]          one-line summary of a week
+  timesheet show [--week W]            the week as JSON, with issue ids
+  timesheet edit --ops F [--week W] [--remote]
+                                       apply changes (JSON ops; F = file or -);
+                                       --remote also deletes pushed issues
   timesheet repo <work|personal|ignore> [--path P] [--project NAME]
   timesheet doctor                     check keys, hooks and tools
   timesheet uninstall [--purge]        remove hooks and command (--purge: data too)
@@ -28,6 +32,8 @@ async function main(): Promise<void> {
       project: { type: 'string' },
       purge: { type: 'boolean' },
       'no-open': { type: 'boolean' },
+      ops: { type: 'string' },
+      remote: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
   });
@@ -39,6 +45,8 @@ async function main(): Promise<void> {
     case 'prepare': return (await import('./commands/prepare.js')).prepareCmd(values.week);
     case 'ingest': return (await import('./commands/ingest.js')).ingestCmd(values.week);
     case 'status': return (await import('./commands/status.js')).status(values.week);
+    case 'show': return (await import('./commands/edit.js')).show(values.week);
+    case 'edit': return (await import('./commands/edit.js')).edit(values.week, values.ops, !!values.remote);
     case 'review': return (await import('./commands/review.js')).review(values.week, !values['no-open']);
     case 'push': return (await import('./commands/push.js')).pushCmd(values.week);
     case 'doctor': return (await import('./commands/doctor.js')).doctor();

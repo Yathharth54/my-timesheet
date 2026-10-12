@@ -47,4 +47,25 @@ describe('timesheet CLI', () => {
       expect(r.stderr).toMatch(/Week 2026-W41 is busy/);
     } finally { release(); }
   });
+
+  it('show lists issues with ids; edit applies ops and holds pushed deletes back without --remote', async () => {
+    const { makeDraft, makeItem } = await import('./helpers.js');
+    const { loadDraft } = await import('../src/lib/store.js');
+    saveConfig(testConfig());
+    saveDraft(makeDraft({ items: [makeItem({ id: 'a' }), makeItem({ id: 'b' }), makeItem({ id: 'p', title: 'Shipped', linear: { uuid: 'u', identifier: 'THE-7', url: null, created: true } })] }));
+    const shown = JSON.parse(cli(['show', '--week', '2026-W41']).stdout);
+    expect(shown.issues.map((i: any) => [i.id, i.inLinear])).toEqual([['a', false], ['b', false], ['p', 'THE-7']]);
+    const ops = path.join(tmpDir(), 'ops.json');
+    fs.writeFileSync(ops, JSON.stringify({ ops: [{ op: 'set', ids: ['a', 'b'], project: 'Dev - Internal' }, { op: 'delete', ids: ['p'] }] }));
+    const r = cli(['edit', '--week', '2026-W41', '--ops', ops]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toMatch(/Move 2 issues to Dev - Internal/);
+    expect(r.stdout).toMatch(/Not deleted yet[\s\S]*THE-7\s+Shipped[\s\S]*--remote/);
+    const d = loadDraft('2026-W41')!;
+    expect(d.items.map(i => [i.project, i.deleted])).toEqual([['Dev - Internal', false], ['Dev - Internal', false], ['Boxsy', false]]);
+    fs.writeFileSync(ops, '[{"op":"set","ids":["zz"],"project":"Boxsy"}]');
+    const bad = cli(['edit', '--week', '2026-W41', '--ops', ops]);
+    expect(bad.status).toBe(1);
+    expect(bad.stderr).toMatch(/No issue with id zz/);
+  });
 });
