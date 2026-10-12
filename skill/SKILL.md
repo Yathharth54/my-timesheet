@@ -74,9 +74,12 @@ When the user asks to change issues in a drafted week ("move all of these to Dev
    - `{"op":"set","ids":["..."],"project":"Dev - Internal"}`, and/or `"day":"YYYY-MM-DD"`; `"title"` or `"description"` only with one id;
    - `{"op":"hours","id":"...","hours":1.5}`;
    - `{"op":"merge","ids":["first","second"]}` (all merge into the first);
-   - `{"op":"delete","ids":["..."]}`.
+   - `{"op":"delete","ids":["..."]}`;
+   - `{"op":"copy","ids":["..."],"days":["YYYY-MM-DD"],"hours":1}` logs the same issue on more days (`hours` is optional).
 3. Relay the lines it prints. An open review tab picks the change up by itself.
 
 **Never edit `draft.json` or any other file under `~/.timesheet/` by hand.** `edit` checks ids, takes the week lock so it can't clash with a push, and logs the user's corrections so later drafts learn from them.
 
-Pushed issues (`inLinear` set) can only be deleted. `edit` holds those back and lists them. Deleting them trashes the issue in Linear (restorable for 30 days) and clears its hours in Everhour, so **ask the user first and name each issue**. Only after they say yes, run the same command again with `--remote`.
+Recurring work (a standup, a team sync, a client call) is **one Linear issue logged on several days**, not one issue per day: use `copy`. In `show`, an issue with `sameIssueAs` is another day of the issue with that id. All its days share the title, description and project; each day has its own hours and can be moved or deleted on its own. Two days of one issue can't sit on the same day.
+
+Pushed issues (`inLinear` set) can only be deleted, or copied to more days. `edit` holds those back and lists them. Deleting them trashes the issue in Linear (restorable for 30 days) and clears its hours in Everhour, so **ask the user first and name each issue**. Only after they say yes, run the same command again with `--remote`.

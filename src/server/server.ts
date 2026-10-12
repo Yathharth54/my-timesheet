@@ -8,7 +8,7 @@ import { resolveWeek, weekDays } from '../lib/week.js';
 import { validate } from '../lib/validate.js';
 import { syncParents } from '../lib/parents.js';
 import { runClaude, runDistribute, type ClaudeRunner } from '../lib/weights.js';
-import { addManualItem, deleteItem, mechanicalSplit, mergeItems, setHours, splitItem } from '../lib/edit.js';
+import { addIssue, deleteItem, mechanicalSplit, mergeItems, setHours, splitItem } from '../lib/edit.js';
 import { push } from '../lib/push.js';
 import { acquireWeekLock } from '../lib/lock.js';
 import { applyOps, corrections, type Op } from '../lib/ops.js';
@@ -85,7 +85,7 @@ export function createServer(deps: ServerDeps = {}): http.Server {
       if (!old) return i;
       if (old.linear?.created) return old;
       if (old.linear) i.linear = old.linear;
-      for (const ex of corrections(old, i)) appendLine(paths.examples(), ex);
+      if (!i.sameAs) for (const ex of corrections(old, i)) appendLine(paths.examples(), ex); // a copy repeats its home's edit
       if (old.title !== i.title || old.description !== i.description) i.edited = true;
       return i;
     });
@@ -186,7 +186,7 @@ export function createServer(deps: ServerDeps = {}): http.Server {
           } finally { release(); }
         }
         case 'POST /api/hours': { const b = await readBody(req); return send(res, 200, wrap(() => { assertNotPushing(resolveWeek(b.week, now())); return commit(setHours(current(resolveWeek(b.week, now())), b.id, Number(b.hours))); })); }
-        case 'POST /api/items': { const b = await readBody(req); return send(res, 200, wrap(() => { assertNotPushing(resolveWeek(b.week, now())); return commit(addManualItem(current(resolveWeek(b.week, now())), b)); })); }
+        case 'POST /api/items': { const b = await readBody(req); return send(res, 200, wrap(() => { assertNotPushing(resolveWeek(b.week, now())); return commit(addIssue(current(resolveWeek(b.week, now())), { title: b.title, description: b.description ?? '', project: b.project ?? null, days: Array.isArray(b.days) ? b.days.map(String) : [String(b.day)], hours: b.hours == null || b.hours === '' ? null : Number(b.hours) }).draft); })); }
         case 'POST /api/delete': { const b = await readBody(req); return send(res, 200, wrap(() => { assertNotPushing(resolveWeek(b.week, now())); return commit(deleteItem(current(resolveWeek(b.week, now())), b.id)); })); }
         case 'POST /api/split': {
           const b = await readBody(req);

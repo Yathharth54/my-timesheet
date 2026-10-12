@@ -39,8 +39,11 @@ export function distribute(input: Draft, opts: { balance?: boolean } = {}): { dr
   const active = draft.items.filter(i => !i.deleted);
   const fixedSum = roundH(active.filter(isFixed).reduce((s, i) => s + (i.hours ?? 0), 0));
   const remaining = roundH(draft.totalHours - fixedSum);
-  if (remaining < -EPS) throw new Error(`Locked items already add up to ${fixedSum}h, more than the ${draft.totalHours}h total.`);
+  if (remaining < -EPS) throw new Error(`Locked issues already add up to ${fixedSum}h, more than the ${draft.totalHours}h total.`);
   const free = active.filter(i => !isFixed(i));
+  if (free.length && remaining + EPS < free.length * UNIT) {
+    throw new Error(`Only ${Math.max(0, remaining)}h of the ${draft.totalHours}h total is left for ${free.length} unlocked issues, and each needs at least ${UNIT}h. Raise the total or lower some locked hours.`);
+  }
   const alloc = allocate(Math.max(0, remaining), free.map(i => ({ id: i.id, weight: i.weight ?? 1 })));
   for (const i of free) i.hours = alloc.get(i.id)!;
   const needsSplit = free.filter(i => (i.hours ?? 0) > MAX_ITEM_HOURS).map(i => i.id);
@@ -55,7 +58,7 @@ export function nearestDay(day: string, days: string[]): string {
 /**
  * Greedy: move items off the heaviest day to the nearest under-average day until every day is within ±1h of the
  * average. Pushed items never move. Locked and hand-added items stay on their day (and still count toward its
- * load); they only move when their day isn't counted, so they land somewhere counted.
+ * load); they only move when their day isn't counted, so they land somewhere counted. Days of a multi-day issue stay put.
  */
 export function balanceDays(draft: Draft): void {
   const days = [...draft.days].sort();
@@ -65,7 +68,9 @@ export function balanceDays(draft: Draft): void {
   const load = new Map(days.map(d => [d, 0]));
   for (const i of items) if (load.has(i.day)) load.set(i.day, load.get(i.day)! + (i.hours ?? 0));
   const avg = [...load.values()].reduce((a, b) => a + b, 0) / days.length;
-  const movable = (i: Item) => !i.linear && !i.locked && !i.evidence.manual && (i.hours ?? 0) > 0;
+  const grouped = new Set(items.filter(i => i.sameAs).flatMap(i => [i.id, i.sameAs!]));
+  // an issue on several days keeps its days: moving one could land it on a day the issue already has
+  const movable = (i: Item) => !i.linear && !i.locked && !i.evidence.manual && !grouped.has(i.id) && (i.hours ?? 0) > 0;
   for (let guard = 0; guard < 1000; guard++) {
     const sorted = [...load].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
     const [hi, hiLoad] = sorted[0];

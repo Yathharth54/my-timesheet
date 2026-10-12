@@ -1,4 +1,5 @@
 import { weekdayName } from './week.js';
+import { normalizeGroups } from './groups.js';
 import type { Draft, Parent, ProposedParent } from './types.js';
 
 export const parentKey = (day: string, project: string): string => `${day}|${project}`;
@@ -8,10 +9,12 @@ export function withCount(desc: string, n: number): string {
   return /\d+ sub-tasks?\.\s*$/.test(desc) ? desc.replace(/\d+ sub-tasks?\.\s*$/, line) : `${desc.trimEnd()}\n\n${line}`;
 }
 
+/** Also repairs multi-day groups first, so every save leaves them consistent. Copies sit under their home's parent. */
 export function syncParents(draft: Draft, proposed: ProposedParent[] = []): Draft {
+  normalizeGroups(draft);
   const counts = new Map<string, number>();
   for (const i of draft.items) {
-    if (i.deleted || !i.project) continue;
+    if (i.deleted || !i.project || i.sameAs) continue;
     const k = parentKey(i.day, i.project);
     counts.set(k, (counts.get(k) ?? 0) + 1);
   }

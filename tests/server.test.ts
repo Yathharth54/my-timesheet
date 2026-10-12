@@ -256,6 +256,19 @@ describe('review server', () => {
     }
   });
 
+  it('adds one issue on several days with hours, and keeps every day in step through PUT /api/draft', async () => {
+    const r = await api('POST', '/api/items', { week: W, title: 'Team sync', description: 'Weekly sync.', project: 'Dev - Internal', days: ['2026-10-09', '2026-10-06'], hours: 1 });
+    expect(r.status).toBe(200);
+    const added = r.json.draft.items.slice(2);
+    expect(added.map((i: any) => [i.day, i.hours, i.locked, i.sameAs ?? null])).toEqual([['2026-10-06', 1, true, null], ['2026-10-09', 1, true, added[0].id]]);
+    expect(r.json.draft.parents.map((p: any) => p.key)).toEqual(['2026-10-05|Boxsy', '2026-10-06|Dev - Internal']);
+    const d = r.json.draft;
+    d.items[2].title = 'Standup'; // the client renames every day; a stale copy must still follow the home
+    const put = await api('PUT', '/api/draft', { draft: d });
+    expect(put.json.draft.items.slice(2).map((i: any) => i.title)).toEqual(['Standup', 'Standup']);
+    expect(readJsonl<any>(paths.examples())).toHaveLength(1);
+  });
+
   it('applies bulk ops in one save, logs corrections and rejects a stale rev', async () => {
     const { json } = await api('GET', `/api/state?week=${W}`);
     const r = await api('POST', '/api/bulk', { week: W, rev: json.draft.rev, ops: [{ op: 'set', ids: ['a', 'b'], project: 'Dev - Internal' }] });

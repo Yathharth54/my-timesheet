@@ -1,4 +1,6 @@
 import { MAX_ITEM_HOURS } from './distribute.js';
+import { clashes } from './groups.js';
+import { weekdayName } from './week.js';
 import type { Draft, Warning } from './types.js';
 
 export const HOURS_IN_TEXT = /\b\d+(?:\.\d+)?\s?(?:h|hrs?|hours?)\b/i;
@@ -16,6 +18,9 @@ export function validate(draft: Draft, projectNames: string[]): Warning[] {
     else if (i.hours > MAX_ITEM_HOURS) w.push({ level: 'block', code: 'over_cap', message: `"${i.title}" is ${i.hours}h; the limit is ${MAX_ITEM_HOURS}h per sub-issue.`, itemId: i.id });
     if (!draft.days.includes(i.day)) w.push({ level: 'block', code: 'day_not_counted', message: `"${i.title}" is on ${i.day}, which isn't a counted day.`, itemId: i.id });
     if (HOURS_IN_TEXT.test(i.title) || HOURS_IN_TEXT.test(i.description)) w.push({ level: 'warn', code: 'hours_in_text', message: `"${i.title}" mentions hours in its text.`, itemId: i.id });
+  }
+  for (const { item, day } of clashes(draft)) {
+    w.push({ level: 'block', code: 'same_day_twice', message: `"${item.title}" is on ${weekdayName(day)} twice. One Linear issue holds one entry per day, so move or delete one.`, itemId: item.id });
   }
   if (draft.totalHours != null && live.length && live.every(i => i.hours != null)) {
     const sum = Math.round(live.reduce((s, i) => s + (i.hours ?? 0), 0) * 1e6) / 1e6;

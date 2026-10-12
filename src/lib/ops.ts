@@ -1,4 +1,5 @@
-import { deleteItem, mergeItems, setHours } from './edit.js';
+import { copyToDays, deleteItem, mergeItems, needsRemote, setHours } from './edit.js';
+import { clashes, homeOf, members } from './groups.js';
 import { weekDays, weekdayName } from './week.js';
 import type { Draft, Item } from './types.js';
 
@@ -7,7 +8,9 @@ export type Op =
   | { op: 'set'; ids: string[]; project?: string; day?: string; title?: string; description?: string }
   | { op: 'hours'; id: string; hours: number }
   | { op: 'merge'; ids: string[] }
-  | { op: 'delete'; ids: string[] };
+  | { op: 'delete'; ids: string[] }
+  /** Logs the same issue on more days, as one Linear issue. Hours default to each source's own. */
+  | { op: 'copy'; ids: string[]; days: string[]; hours?: number };
 
 export type Example =
   | { kind: 'bucket'; title: string; description: string; from: string | null; to: string | null; at: string }
@@ -72,15 +75,24 @@ export function applyOps(input: Draft, ops: Op[], projectNames: string[]): OpsRe
         if (op.description !== undefined && !String(op.description).trim()) throw new Error("A description can't be empty.");
         if (op.project === undefined && op.day === undefined && op.title === undefined && op.description === undefined) throw new Error('A set op needs project, day, title or description.');
         const names = items.map(ref); // before any rename
+        const shared = op.project !== undefined || op.title !== undefined || op.description !== undefined;
         for (const item of items) {
-          const before = structuredClone(item);
-          if (op.project !== undefined) item.project = op.project;
+          // title, description and project belong to the Linear issue, so they change on every day of it
+          const home = homeOf(draft, item);
+          if (shared && home.linear) throw new Error(`${ref(home)} is already in Linear, so its title, description and project are fixed. Only the hours and day of its unprinted days can change.`);
+          const group = shared ? members(draft, item) : [item];
+          for (const it of group) {
+            const before = structuredClone(it);
+            if (op.project !== undefined) it.project = op.project;
+            if (op.title !== undefined) it.title = String(op.title).trim();
+            if (op.description !== undefined) it.description = String(op.description).trim();
+            if (it.title !== before.title || it.description !== before.description) it.edited = true;
+            if (!it.sameAs) examples.push(...corrections(before, it));
+          }
           if (op.day !== undefined) item.day = op.day;
-          if (op.title !== undefined) item.title = String(op.title).trim();
-          if (op.description !== undefined) item.description = String(op.description).trim();
-          if (item.title !== before.title || item.description !== before.description) item.edited = true;
-          examples.push(...corrections(before, item));
         }
+        const clash = clashes(draft)[0];
+        if (clash) throw new Error(`"${clash.item.title}" would be on ${weekdayName(clash.day)} twice. One Linear issue holds one entry per day.`);
         const what = [
           op.project !== undefined && `to ${op.project}`,
           op.day !== undefined && `to ${weekdayName(op.day)}`,
@@ -110,11 +122,31 @@ export function applyOps(input: Draft, ops: Op[], projectNames: string[]): OpsRe
         const local: string[] = [];
         for (const id of list) {
           const item = live(draft, id);
-          if (item.linear) { if (!remote.includes(id)) remote.push(id); } else local.push(id);
+          if (needsRemote(draft, item, list)) { if (!remote.includes(id)) remote.push(id); } else local.push(id);
         }
         for (const id of local) draft = deleteItem(draft, id);
         const pushed = list.length - local.length;
         summary.push(`Delete ${plural(list.length, 'issue')}${pushed ? ` (${pushed} from Linear and Everhour too)` : ''}`);
+        break;
+      }
+      case 'copy': {
+        const list = ids(op.ids);
+        if (!Array.isArray(op.days) || !op.days.length) throw new Error('A copy op needs at least one day.');
+        const hours = op.hours == null ? null : Number(op.hours);
+        let copied = 0;
+        for (const id of list) {
+          const item = live(draft, id);
+          const have = new Set(members(draft, item).map(m => m.day));
+          const days = op.days.map(String).filter(d => !have.has(d));
+          if (!days.length) {
+            if (list.length === 1) throw new Error(`"${item.title}" is already on ${op.days.map(weekdayName).join(' and ')}.`);
+            continue; // in a bulk copy, issues that already have every day are left alone
+          }
+          draft = copyToDays(draft, id, days, hours).draft;
+          copied++;
+          summary.push(`Log ${ref(item)} on ${days.map(weekdayName).join(', ')} too${hours != null ? ` at ${hours.toFixed(1)}h` : ''}`);
+        }
+        if (!copied) throw new Error('Every picked issue is already on those days.');
         break;
       }
       default: throw new Error(`Unknown op ${JSON.stringify((op as { op?: unknown })?.op)}.`);

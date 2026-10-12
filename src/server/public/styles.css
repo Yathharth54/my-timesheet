@@ -345,6 +345,29 @@ textarea.m-input { resize: vertical; min-height: 88px; }
 .modal.add .m-foot { border-top: 1px solid var(--paper-3); margin-top: 8px; padding-top: 20px; border-radius: 0 0 16px 16px; }
 .m-foot-note { margin-right: auto; }
 @media (max-width: 560px) { .m-two { grid-template-columns: minmax(0, 1fr); } .m-foot-note { display: none; } }
+/* day toggles on the add and copy sheets */
+.m-days { display: grid; grid-template-columns: repeat(auto-fit, minmax(64px, 1fr)); gap: 8px; }
+.m-day { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 8px 4px; min-height: 52px; border: 1px solid var(--paper-3); border-radius: 10px; background: #FFFFFF; color: var(--ink); transition: background .12s, border-color .12s, color .12s; }
+.m-day:hover:not([disabled]) { border-color: #CFCBBC; }
+.m-day:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(30, 30, 28, .14); }
+.m-day.on { background: var(--ink); border-color: var(--ink); color: var(--paper); }
+.m-day.taken { background: var(--paper-2); border-style: dashed; color: var(--ink-2); cursor: not-allowed; }
+.m-day-n { font-weight: 600; font-size: 14px; }
+.m-day-d { font-size: 12px; opacity: .72; }
+.m-opt { margin-left: 4px; font-weight: 400; color: var(--ink-2); }
+.m-hours { max-width: 180px; font-family: var(--mono); }
+.m-q { font-weight: 700; }
+.m-list .m-note { grid-column: 1 / -1; margin-top: -4px; font-size: 13px; color: var(--ink-2); }
+.modal.copy { width: min(520px, calc(100% - 32px)); }
+
+/* an issue logged on several days */
+.r-line.pv-add { background: var(--amber-tint); border-radius: 4px; cursor: default; }
+.p-day { margin-left: 4px; color: var(--ink-2); font-size: 12px; }
+.r-multi { flex: none; align-self: center; display: inline-flex; margin-left: -2px; color: var(--ink-2); }
+.day-chip { gap: 6px; background: transparent; cursor: pointer; transition: background .12s, border-color .12s, color .12s; }
+.day-chip:hover { color: var(--text); border-color: var(--beige-line); }
+.day-chip.on { background: var(--beige); border-color: var(--beige); color: var(--ink); font-weight: 600; }
+.day-chip-h { font-family: var(--mono); font-size: 12px; opacity: .8; }
 .add-line .paper-btn .kbd { background: var(--paper-2); color: var(--ink-2); margin-left: 6px; }
 
 /* Ask mode: the chat takes the left half, the receipt stays on the right */

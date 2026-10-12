@@ -9,6 +9,7 @@ export function assistPrompt(draft: Draft, config: Pick<Config, 'projects' | 'in
   const issues = draft.items.filter(i => !i.deleted).map(i => ({
     id: i.id, title: i.title, description: i.description, project: i.project, day: i.day, weekday: weekdayName(i.day),
     hours: i.hours, locked: i.locked, inLinear: i.linear ? (i.linear.identifier ?? true) : false,
+    ...(i.sameAs ? { sameIssueAs: i.sameAs } : {}),
   }));
   return [
     'You help someone tidy one week of their timesheet in a review screen. Each issue becomes a Linear sub-issue with hours in Everhour.',
@@ -17,9 +18,11 @@ export function assistPrompt(draft: Draft, config: Pick<Config, 'projects' | 'in
     '  {"op":"hours","id":"...","hours":1.5}',
     '  {"op":"merge","ids":["first","second",...]}   (all merge into the first)',
     '  {"op":"delete","ids":["..."]}',
+    '  {"op":"copy","ids":["..."],"days":["YYYY-MM-DD",...],"hours":1}   (logs the same issue on more days; hours is optional and defaults to the issue\'s own)',
     'Rules:',
     '- Use only ids listed below. Never invent ids, projects or days.',
     '- Issues with inLinear set are already in Linear: only delete works on them. Deleting one also removes it from Linear and its hours from Everhour, and the person confirms that separately.',
+    '- Recurring work (a standup, a team sync, a client call) is one issue logged on several days: use copy, never add new issues for it. Issues with sameIssueAs are other days of the issue with that id. Title, description and project are shared by every day of it; hours and day are per day. Copy only to counted days, and never to a day the issue already has.',
     '- Titles are 2 to 3 words. Never put hours or durations in a title or description.',
     '- If the request is unclear or impossible, return no ops and say why in the reply.',
     '- In the reply, name issues by title (and Linear identifier if it has one), never by id.',

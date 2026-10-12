@@ -31,7 +31,7 @@ npx my-timesheet init      # once: keys, projects, work orgs, hooks
 | `timesheet push [--week last]` | push from the terminal |
 | `timesheet status` | one-line summary |
 | `timesheet show [--week last]` | the week as JSON, with issue ids |
-| `timesheet edit --ops changes.json [--remote]` | apply changes (move, rename, merge, delete); `--remote` also deletes pushed issues from Linear and Everhour |
+| `timesheet edit --ops changes.json [--remote]` | apply changes (move, rename, merge, delete, copy to more days); `--remote` also deletes pushed issues from Linear and Everhour |
 | `timesheet repo work --project Boxsy` | classify the current repo |
 | `timesheet doctor` | check keys, hooks and tools |
 | `timesheet uninstall [--purge]` | remove hooks (and data) |

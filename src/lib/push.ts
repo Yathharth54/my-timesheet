@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { validate } from './validate.js';
 import { parentKey, syncParents } from './parents.js';
+import { homeOf } from './groups.js';
 import type { CreateIssueInput, LinearApi } from './linear.js';
 import type { EverhourApi } from './everhour.js';
 import type { Config, Draft, Item, LinearRef, Warning } from './types.js';
@@ -83,7 +84,10 @@ export async function push(draft: Draft, deps: PushDeps): Promise<PushResult> {
   }
   syncParents(draft);
 
-  const keys = [...new Set(pending.map(i => parentKey(i.day, i.project!)))];
+  // Copies share their home's Linear issue, so only homes are created; a copy just logs its own day on it.
+  const homes = pending.filter(i => !i.sameAs);
+  const copies = pending.filter(i => i.sameAs);
+  const keys = [...new Set(homes.map(i => parentKey(i.day, i.project!)))];
   let done = 0;
   for (const key of keys) {
     const parent = draft.parents.find(p => p.key === key)!;
@@ -96,22 +100,28 @@ export async function push(draft: Draft, deps: PushDeps): Promise<PushResult> {
   }
 
   done = 0;
-  await pool(pending, conc, async item => {
+  await pool(homes, conc, async item => {
     const p = project(item.project!);
     const parent = draft.parents.find(x => x.key === parentKey(item.day, item.project!))!;
     await ensure(item, {
       teamId: p.teamId, projectId: p.id, assigneeId: config.linear.assigneeId, stateId: p.stateId, labelIds: p.labelIds,
       parentId: parent.linear!.uuid, title: item.title, description: item.description,
     });
-    progress('issues', ++done, pending.length);
+    progress('issues', ++done, homes.length);
   });
+  for (const copy of copies) {
+    const home = homeOf(draft, copy);
+    if (!home.linear?.created) throw new Error(`"${copy.title}" on ${copy.day} has no Linear issue to log onto.`);
+    if (copy.linear?.uuid !== home.linear.uuid) { copy.linear = { ...home.linear }; deps.save(draft); }
+  }
 
   for (const id of new Set(pending.map(i => project(i.project!).id))) await deps.everhour.syncProject(id);
+  const byIssue = new Map(pending.map(i => [i.linear!.uuid, i]));
   const missing: Item[] = [];
   done = 0;
-  await pool(pending, conc, async item => {
+  await pool([...byIssue.values()], conc, async item => {
     if (!(await existsWithRetry(item.linear!.uuid))) missing.push(item);
-    progress('sync', ++done, pending.length);
+    progress('sync', ++done, byIssue.size);
   });
   if (missing.length) {
     return { status: 'awaiting_sync', missing: missing.map(i => ({ identifier: i.linear!.identifier ?? i.title, project: i.project! })) };
@@ -127,5 +137,5 @@ export async function push(draft: Draft, deps: PushDeps): Promise<PushResult> {
 
   draft.pushed = true;
   deps.save(draft);
-  return { status: 'done', issues: pending.length, hours: pending.reduce((s, i) => s + (i.hours ?? 0), 0) };
+  return { status: 'done', issues: byIssue.size, hours: pending.reduce((s, i) => s + (i.hours ?? 0), 0) };
 }

@@ -86,11 +86,24 @@ const projectNames = () => state.projects.map(p => p.name);
 const kindOf = name => state.projects.find(p => p.name === name)?.kind;
 const isPushed = i => !!i.linear?.created; // read-only everywhere
 const isFrozen = i => !!i.linear; // the server refuses hours, split, merge and delete once a Linear id exists
+// An issue logged on several days is one Linear issue: a home item plus copies (sameAs = the home's id), one per day.
+// Title, description and project belong to the issue, so they change on every day; hours, lock and day are per day.
+const homeIdOf = i => i.sameAs ?? i.id;
+const homeOfItem = i => (i.sameAs ? state.draft.items.find(x => x.id === i.sameAs) ?? i : i);
+const groupOf = i => live().filter(x => homeIdOf(x) === homeIdOf(i)).sort((a, b) => a.day.localeCompare(b.day));
+const multiDay = i => !!i.sameAs || live().some(x => x.sameAs === i.id);
+const sharedFixed = i => isPushed(i) || !!homeOfItem(i).linear; // the issue is in Linear: its text and project are set
+const sharedRef = i => i.linear ?? (i.sameAs ? homeOfItem(i).linear : null);
+/** Deleting it touches Linear or Everhour: it is printed, or it's the last day of an issue that is. */
+const needsRemote = (i, also = []) => isFrozen(i) || (!!sharedRef(i) && groupOf(i).every(m => m.id === i.id || also.includes(m.id)));
+const homeKey = i => { const h = homeOfItem(i); return `${h.day}|${h.project}`; };
+const shortDay = d => dname(d).slice(0, 3);
 const color = p => { const k = projectNames().indexOf(p); return k < 0 ? 'var(--bad-ink)' : `var(--p${(k % 6) + 1})`; };
 const parentTitle = (day, project) => state.draft.parents.find(p => p.key === `${day}|${project}`)?.title || `${dname(day)} — ${project}`;
 const unlogged = () => live().filter(i => !i.everhour?.logged);
 const blocks = () => state.warnings.filter(w => w.level === 'block');
 
+const k_SAME = '\u0000same'; // the receipt group for days of issues that live under another day's parent
 function groupedDays() {
   const act = live();
   const counted = state.draft.days;
@@ -99,8 +112,12 @@ function groupedDays() {
   const days = [...new Set([...counted, ...act.map(i => i.day)])].sort();
   return days.map(day => {
     const its = act.filter(i => i.day === day);
-    const keys = [...new Set(its.map(i => i.project ?? ''))].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
-    return { day, counted: counted.includes(day), total: its.reduce((s, i) => s + (i.hours ?? 0), 0), count: its.length, groups: keys.map(k => ({ key: k, items: its.filter(i => (i.project ?? '') === k) })) };
+    // copies sit under their home day's parent in Linear, so they get their own group instead of this day's parent
+    const own = its.filter(i => !i.sameAs), copies = its.filter(i => i.sameAs);
+    const keys = [...new Set(own.map(i => i.project ?? ''))].sort((a, b) => rank(a) - rank(b) || a.localeCompare(b));
+    const groups = keys.map(k => ({ key: k, items: own.filter(i => (i.project ?? '') === k) }));
+    if (copies.length) groups.push({ key: k_SAME, items: copies });
+    return { day, counted: counted.includes(day), total: its.reduce((s, i) => s + (i.hours ?? 0), 0), count: its.length, groups };
   }).filter(d => d.counted || d.count);
 }
 const receiptOrder = () => groupedDays().flatMap(d => d.groups.flatMap(g => g.items));
@@ -254,7 +271,10 @@ async function act(url, body) {
 /** Changes a field that travels through PUT /api/draft. Text fields skip the re-render: the input already shows the value. */
 function setField(it, field, value, rerender = true) {
   if (!it || isPushed(it)) return;
-  it[field] = value;
+  const shared = field === 'title' || field === 'description' || field === 'project';
+  if (shared && sharedFixed(it)) return;
+  if (field === 'day' && value !== it.day && groupOf(it).some(m => m.day === value)) { toast(`"${it.title}" is already on ${dname(value)}.`); return render(); }
+  for (const x of shared ? groupOf(it) : [it]) x[field] = value;
   scheduleSave();
   if (rerender) render();
 }
@@ -273,6 +293,7 @@ function stepHours(it, delta, floorFrom) {
 }
 async function splitLine(it) {
   if (!it || isFrozen(it)) return;
+  if (multiDay(it)) return toast('An issue on several days can\'t be split.');
   if (await act('/api/split', { id: it.id, parts: 2 })) { state.sel = `${it.id}-1`; render(); toast('Split in two. Press Itemise to give them hours.'); }
 }
 async function mergeInto(firstId, otherId) {
@@ -280,13 +301,16 @@ async function mergeInto(firstId, otherId) {
   if (await act('/api/merge', { ids: [firstId, otherId] })) { state.sel = firstId; render(); toast('Merged.'); }
 }
 async function deleteLine(it) {
-  if (!it || isFrozen(it)) return;
+  if (!it) return;
+  if (needsRemote(it)) return requestDelete([it.id]);
   if (state.armedDelete !== it.id) { state.armedDelete = it.id; render(); toast('Press again to delete this issue.'); return; }
   state.armedDelete = null;
-  if (await act('/api/delete', { id: it.id })) toast("Issue deleted. /timesheet won't redraft it.");
+  const day = multiDay(it) ? dname(it.day) : null;
+  if (await act('/api/delete', { id: it.id })) toast(day ? `${day} removed from "${it.title}". Its other days stay.` : "Issue deleted. /timesheet won't redraft it.");
 }
 function toggleMark(it) {
   if (!it || isFrozen(it)) return;
+  if (multiDay(it)) return toast('An issue on several days can\'t be merged. Delete the days you don\'t want instead.');
   if (state.mergeFrom && state.mergeFrom !== it.id) return mergeInto(state.mergeFrom, it.id);
   state.mergeFrom = it.id; render(); toast('Marked. Press m on another issue to merge.');
 }
@@ -305,9 +329,9 @@ function openAdd() {
   const days = state.draft.days.length ? [...state.draft.days].sort() : weekDays(state.week);
   const selDay = findItem(state.sel)?.day;
   openModal({
-    kind: 'add', title: '', desc: '', error: null,
+    kind: 'add', title: '', desc: '', hours: '', error: null,
     project: findItem(state.sel)?.project ?? projectNames()[0] ?? null,
-    day: days.includes(selDay) ? selDay : days[0],
+    days: new Set([days.includes(selDay) ? selDay : days[0]]),
   });
   $('#add-title')?.focus();
 }
@@ -315,14 +339,48 @@ async function submitAdd() {
   const m = state.modal;
   if (m?.kind !== 'add' || m.busy) return;
   if (!m.title.trim()) { m.error = 'Give the issue a title.'; render(); return $('#add-title')?.focus(); }
-  m.busy = true; m.error = null; render();
+  const hours = m.hours.trim() === '' ? null : Number(m.hours);
+  if (hours !== null && !(hours > 0 && hours * 2 === Math.round(hours * 2))) { m.hoursError = 'Use half hours above 0, like 1 or 1.5.'; render(); return $('#add-hours')?.focus(); }
+  if (!m.days.size) { m.hoursError = null; m.daysError = 'Pick at least one day.'; return render(); }
+  m.busy = true; m.error = null; m.hoursError = null; m.daysError = null; render();
   const before = new Set(state.draft.items.map(i => i.id));
-  const d = await act('/api/items', { title: m.title, description: m.desc, project: m.project, day: m.day });
+  const days = [...m.days].sort();
+  const d = await act('/api/items', { title: m.title, description: m.desc, project: m.project, days, hours });
   m.busy = false;
   if (!d) { render(); return; }
   state.modal = null;
   state.sel = d.items.find(i => !before.has(i.id))?.id ?? state.sel;
-  render(); toast('Issue added. Press Itemise to give it hours.');
+  render();
+  const on = days.length > 1 ? ` on ${days.map(shortDay).join(', ')} as one Linear issue` : '';
+  toast(`Issue added${on}.${hours === null ? ' Press Itemise to give it hours.' : ''}`);
+}
+
+/** The copy sheet: logs one or more issues on more days, each as the same Linear issue. */
+function openCopy(ids) {
+  const its = ids.map(findItem).filter(Boolean);
+  if (!its.length || !state.draft || state.print) return;
+  const counted = [...state.draft.days].sort();
+  if (counted.length < 2) return toast('Count at least two days this week to copy an issue to another day.');
+  openModal({ kind: 'copy', ids: its.map(i => i.id), days: new Set(), hours: its.length === 1 && its[0].locked && its[0].hours != null ? String(its[0].hours) : '', error: null });
+}
+/** Days every picked issue already has can't be picked. */
+const copyTaken = (m, day) => m.ids.map(findItem).filter(Boolean).every(i => groupOf(i).some(x => x.day === day));
+async function submitCopy() {
+  const m = state.modal;
+  if (m?.kind !== 'copy' || m.busy) return;
+  if (!m.days.size) { m.error = 'Pick at least one day.'; return render(); }
+  const single = m.ids.length === 1;
+  const hours = single && m.hours.trim() !== '' ? Number(m.hours) : null;
+  if (hours !== null && !(hours > 0 && hours * 2 === Math.round(hours * 2))) { m.error = 'Use half hours above 0, like 1 or 1.5.'; render(); return $('#copy-hours')?.focus(); }
+  m.busy = true; m.error = null; render();
+  const res = await bulk([{ op: 'copy', ids: m.ids, days: [...m.days].sort(), ...(hours !== null ? { hours } : {}) }]);
+  m.busy = false;
+  if (state.modal !== m) return;
+  if (!res) { m.error = state.toast || 'Not copied.'; return render(); }
+  state.modal = null;
+  if (!single) state.picked = new Set();
+  render();
+  toast(`${res.summary.join('. ')}.`);
 }
 
 // ---------- picking several issues ----------
@@ -388,20 +446,29 @@ function bulkMerge() {
 function requestDelete(ids) {
   const its = ids.map(findItem).filter(Boolean);
   if (!its.length) return;
-  const pushed = its.filter(isFrozen), local = its.filter(i => !isFrozen(i));
-  const gone = new Set(its.map(i => i.id));
-  const emptied = [...new Set(pushed.filter(i => i.project).map(i => `${i.day}|${i.project}`))]
-    .filter(key => live().every(i => `${i.day}|${i.project}` !== key || gone.has(i.id)))
+  const all = its.map(i => i.id);
+  const pushed = its.filter(i => needsRemote(i, all)), local = its.filter(i => !needsRemote(i, all));
+  const gone = new Set(all);
+  // a day of an issue that keeps other days only clears that day; the issue stays in Linear
+  const stays = i => groupOf(i).filter(m => !gone.has(m.id));
+  const emptied = [...new Set(pushed.filter(i => homeOfItem(i).project).map(homeKey))]
+    .filter(key => live().every(i => homeKey(i) !== key || gone.has(i.id)))
     .map(key => state.draft.parents.find(p => p.key === key)).filter(p => p?.linear);
-  const row = i => `<li><span class="m-id">${esc(i.linear?.identifier ?? '·····')}</span><span class="m-t">${esc(i.title)}</span><span class="m-h">${i.everhour?.logged ? `${fmt(i.hours)} h · ${dname(i.day).slice(0, 3)}` : 'no hours yet'}</span></li>`;
+  const row = i => {
+    const keep = stays(i);
+    const note = keep.length ? `<span class="m-note">Only this day. The issue stays in Linear for ${keep.map(x => shortDay(x.day)).join(', ')}.</span>` : '';
+    return `<li><span class="m-id">${esc(sharedRef(i)?.identifier ?? '·····')}</span><span class="m-t">${esc(i.title)}</span><span class="m-h">${i.everhour?.logged ? `${fmt(i.hours)} h · ${shortDay(i.day)}` : `no hours yet · ${shortDay(i.day)}`}</span>${note}</li>`;
+  };
+  const dayOnly = pushed.length > 0 && pushed.every(i => stays(i).length);
   let localDone = !local.length;
   openModal({
     kind: 'confirm', danger: true, focusCancel: pushed.length > 0,
-    title: `Delete ${plural(its.length, 'issue')}?`,
-    ok: pushed.length ? 'Delete from Linear and Everhour' : `Delete ${plural(its.length, 'issue')}`,
+    title: dayOnly && its.length === 1 ? `Remove ${dname(its[0].day)} from ${esc(sharedRef(its[0])?.identifier ?? its[0].title)}?` : dayOnly ? `Remove ${plural(its.length, 'day')}?` : `Delete ${plural(its.length, 'issue')}?`,
+    ok: dayOnly ? 'Clear from Everhour' : pushed.length ? 'Delete from Linear and Everhour' : `Delete ${plural(its.length, 'issue')}`,
     body: [
       local.length ? `<p>${local.length === its.length ? (local.length === 1 ? 'It comes' : 'They come') : `${plural(local.length, 'issue')} come`} off this week. /timesheet won't draft ${local.length === 1 ? 'it' : 'them'} again.</p>` : '',
-      pushed.length ? `<p>${pushed.length === 1 ? (its.length === 1 ? 'It is' : 'One is') : `${pushed.length === its.length ? '' : 'These '}${plural(pushed.length, 'issue')} are`} already printed. ${pushed.length === 1 ? 'It goes' : 'Each one goes'} to Linear's trash (you can restore it there for 30 days) and its hours are cleared in Everhour:</p><ul class="m-list">${pushed.map(row).join('')}</ul>` : '',
+      dayOnly ? `<p>${pushed.length === 1 ? 'Its' : 'Their'} hours are cleared in Everhour for ${pushed.length === 1 ? 'that day' : 'those days'}. The Linear issue keeps its other days.</p><ul class="m-list">${pushed.map(row).join('')}</ul>` : '',
+      pushed.length && !dayOnly ? `<p>${pushed.length === 1 ? (its.length === 1 ? 'It is' : 'One is') : `${pushed.length === its.length ? '' : 'These '}${plural(pushed.length, 'issue')} are`} already printed. ${pushed.length === 1 ? 'It goes' : 'Each one goes'} to Linear's trash (you can restore it there for 30 days) and its hours are cleared in Everhour:</p><ul class="m-list">${pushed.map(row).join('')}</ul>` : '',
       emptied.length ? `<p>That leaves ${emptied.length === 1 ? 'a parent' : 'parents'} with nothing under ${emptied.length === 1 ? 'it' : 'them'}, so ${emptied.map(p => `<strong>${esc(p.linear.identifier ?? p.title)}</strong>`).join(', ')} ${emptied.length === 1 ? 'goes' : 'go'} to the trash too.</p>` : '',
     ].join(''),
     run: async () => {
@@ -409,13 +476,13 @@ function requestDelete(ids) {
         if (!(await bulk([{ op: 'delete', ids: local.map(i => i.id) }]))) return false;
         localDone = true;
       }
-      if (pushed.length) return removeRemote(pushed.map(i => i.id));
+      if (pushed.length) return removeRemote(pushed.map(i => i.id), dayOnly);
       toast(`Deleted ${plural(local.length, 'issue')}. /timesheet won't redraft ${local.length === 1 ? 'it' : 'them'}.`);
       return true;
     },
   });
 }
-async function removeRemote(ids) {
+async function removeRemote(ids, dayOnly = false) {
   if (!(await save())) return false;
   const sent = structuredClone(state.draft);
   try {
@@ -428,6 +495,7 @@ async function removeRemote(ids) {
       if (res.removed.length) toast(`Deleted ${plural(res.removed.length, 'issue')}. ${plural(res.failed.length, 'step')} failed.`);
       return false;
     }
+    if (dayOnly) { toast(`Cleared ${plural(res.removed.length, 'day')} from Everhour. The issue stays in Linear.`); return true; }
     toast(`Deleted ${plural(res.removed.length, 'issue')} from Linear and Everhour${res.parents.length ? `, plus ${plural(res.parents.length, 'empty parent')}` : ''}.`);
     return true;
   } catch (e) {
@@ -448,7 +516,7 @@ function openModal(m) {
 function focusModal() {
   const m = state.modal;
   if (!m) return;
-  const want = m.kind === 'add' ? '#add-title' : m.focusCancel ? '#modal-cancel' : '#modal-ok';
+  const want = m.kind === 'add' ? '#add-title' : m.kind === 'copy' ? '.m-day:not([disabled])' : m.focusCancel ? '#modal-cancel' : '#modal-ok';
   (document.querySelector(want) ?? document.querySelector('.modal button'))?.focus();
 }
 function closeModal() {
@@ -475,12 +543,13 @@ const COMMANDS = [
   { id: 'reweight', label: 'Estimate effort again and itemise', words: 'reweight weights re-estimate', run: () => distribute(true) },
   { id: 'print', label: 'Print to Linear and Everhour', key: 'P', words: 'push send', run: () => { state.tab = 'week'; requestPush(); } },
   { id: 'add', label: 'Add an issue by hand', key: 'a', words: 'new manual', run: () => { if (state.tab !== 'week') switchTab('week'); openAdd(); } },
+  { id: 'copy', label: 'Copy the issue to other days', key: 'c', words: 'duplicate repeat recurring meeting days log', run: () => { const its = pickedItems(); openCopy(its.length ? its.map(i => i.id) : [state.sel]); } },
   { id: 'pick-all', label: 'Pick every issue', words: 'select all bulk', run: () => { state.tab = 'week'; state.picked = new Set(live().map(i => i.id)); render(); } },
   { id: 'history', label: 'Past weeks', words: 'history', run: () => switchTab('history') },
   { id: 'settings', label: 'Settings', words: 'repos projects orgs reminder', run: () => switchTab('settings') },
   { id: 'help', label: 'Keyboard shortcuts', key: '?', words: 'help keys', run: () => { state.help = true; renderOverlay(); } },
 ];
-const EXAMPLES = ["Move Tuesday's issues to Dev - Internal", 'Merge the two QA issues', 'Give the spec review 2 hours'];
+const EXAMPLES = ["Move Tuesday's issues to Dev - Internal", 'Log the spec review on Friday too', 'Give the spec review 2 hours'];
 function commandRows(q) {
   const t = q.trim().toLowerCase();
   if (!t) return [];
@@ -598,14 +667,22 @@ async function applyAsk() {
 function askPreview() {
   const ops = state.ask?.pending?.ops;
   if (!ops) return null;
-  const touched = new Set(), gone = new Set();
+  const touched = new Set(), gone = new Set(), adds = [];
   for (const o of ops) {
     const ids = o.ids ?? (o.id ? [o.id] : []);
     if (o.op === 'delete') ids.forEach(id => gone.add(id));
     else if (o.op === 'merge') { touched.add(ids[0]); ids.slice(1).forEach(id => gone.add(id)); }
-    else ids.forEach(id => touched.add(id));
+    else if (o.op === 'copy') {
+      for (const id of ids) {
+        const it = findItem(id);
+        if (!it) continue;
+        const group = groupOf(it);
+        group.forEach(m => touched.add(m.id));
+        for (const day of o.days ?? []) if (!group.some(m => m.day === day)) adds.push({ day, title: it.title, hours: o.hours ?? it.hours });
+      }
+    } else ids.forEach(id => touched.add(id));
   }
-  return { touched, gone };
+  return { touched, gone, adds };
 }
 
 // ---------- custom select ----------
@@ -672,7 +749,7 @@ function renderTop() {
 }
 function renderToast() { $('#toast').innerHTML = state.toast ? `<div class="toast" role="status">${esc(state.toast)}</div>` : ''; }
 
-const HELP = [['j / k', 'next / previous issue'], ['e', 'edit the title'], ['p', 'next project'], ['[ / ]', 'half an hour less / more (locks the issue)'], ['L', 'lock or unlock hours'], ['s', 'split in two'], ['m', 'mark, then m on another issue to merge'], ['d d', 'delete the issue'], ['x', 'pick the issue (shift-click picks a range)'], ['a', 'add an issue'], ['D', 'itemise hours'], ['P', 'print to Linear and Everhour'], ['/ or ⌘K', 'commands and Ask Claude'], ['?', 'show or hide this']];
+const HELP = [['j / k', 'next / previous issue'], ['e', 'edit the title'], ['p', 'next project'], ['[ / ]', 'half an hour less / more (locks the issue)'], ['L', 'lock or unlock hours'], ['s', 'split in two'], ['m', 'mark, then m on another issue to merge'], ['c', 'copy the issue to other days (one Linear issue)'], ['d d', 'delete the issue'], ['x', 'pick the issue (shift-click picks a range)'], ['a', 'add an issue'], ['D', 'itemise hours'], ['P', 'print to Linear and Everhour'], ['/ or ⌘K', 'commands and Ask Claude'], ['?', 'show or hide this']];
 function renderOverlay() {
   const help = state.help ? `<div class="overlay" role="dialog" aria-label="Keyboard shortcuts"><strong>Keyboard</strong><dl>${HELP.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl></div>` : '';
   $('#overlay').innerHTML = help + renderModal();
@@ -683,10 +760,11 @@ function renderModal() {
   const m = state.modal;
   if (!m) return '';
   return `<div class="modal-back ${m.enter ? 'enter' : ''}" data-act="modal-back"></div>
-    <div class="modal ${m.kind} ${m.danger ? 'danger' : ''} ${m.enter ? 'enter' : ''}" role="dialog" aria-modal="true" aria-labelledby="modal-title">${m.kind === 'add' ? renderAddModal(m) : renderConfirm(m)}</div>`;
+    <div class="modal ${m.kind} ${m.danger ? 'danger' : ''} ${m.enter ? 'enter' : ''}" role="dialog" aria-modal="true" aria-labelledby="modal-title">${m.kind === 'add' ? renderAddModal(m) : m.kind === 'copy' ? renderCopyModal(m) : renderConfirm(m)}</div>`;
 }
 function renderAddModal(m) {
-  const days = weekDays(state.week);
+  const counted = [...state.draft.days].sort();
+  const days = counted.length ? counted : weekDays(state.week).slice(0, 5);
   return `<form id="addform" novalidate>
     <div class="m-head"><h2 id="modal-title">Add an issue</h2><p class="m-sub">For work that left no commits or Claude sessions, like a call or a review.</p></div>
     <div class="m-body m-form">
@@ -701,13 +779,61 @@ function renderAddModal(m) {
       </div>
       <div class="m-two">
         <div class="m-field"><span class="m-label">Project</span>${select('add-project', projectOptions(), m.project, v => { m.project = v; }, { label: 'Project' })}</div>
-        <div class="m-field"><span class="m-label">Day</span>${select('add-day', days.map(x => ({ v: x, label: dname(x), hint: state.draft.days.includes(x) ? '' : 'not counted' })), m.day, v => { m.day = v; }, { label: 'Day' })}</div>
+        <div class="m-field">
+          <label for="add-hours">Hours each day <span class="m-opt">optional</span></label>
+          <input id="add-hours" class="m-input" inputmode="decimal" value="${esc(m.hours)}" placeholder="Itemise decides" autocomplete="off" ${m.hoursError ? 'aria-invalid="true" aria-describedby="add-hours-err"' : ''}>
+          ${m.hoursError ? `<span class="m-field-err" id="add-hours-err" role="alert">${esc(m.hoursError)}</span>` : ''}
+        </div>
+      </div>
+      <div class="m-field">
+        <span class="m-label" id="add-days-label">Days</span>
+        ${dayChips('add', days, d => m.days.has(d), () => false)}
+        <span class="${m.daysError ? 'm-field-err' : 'm-faint'}" ${m.daysError ? 'role="alert"' : ''}>${m.daysError ? esc(m.daysError) : m.days.size > 1 ? `One Linear issue with hours on ${[...m.days].sort().map(shortDay).join(', ')} in Everhour.` : 'Pick more than one day for a meeting that repeats. It stays one Linear issue.'}</span>
       </div>
     </div>
     <div class="m-foot">
-      <span class="m-faint m-foot-note">Itemise gives it hours afterwards.</span>
+      <span class="m-faint m-foot-note">${m.hours.trim() ? 'Hours stay locked. You can change them later.' : 'Itemise gives it hours afterwards.'}</span>
       <button type="button" class="m-btn" id="modal-cancel" data-act="modal-cancel" ${m.busy ? 'disabled' : ''}>Cancel</button>
       <button type="submit" class="m-btn solid" id="modal-ok" ${m.busy ? 'disabled' : ''}>${m.busy ? 'Adding…' : 'Add issue'}</button>
+    </div>
+  </form>`;
+}
+/** A row of day toggles on the paper sheets. `taken` days are already on the issue and can't be picked. */
+function dayChips(kind, days, on, taken) {
+  return `<div class="m-days" role="group" aria-labelledby="${kind}-days-label">${days.map(d => {
+    const t = taken(d), sel = on(d);
+    return `<button type="button" class="m-day ${sel ? 'on' : ''} ${t ? 'taken' : ''}" data-act="${kind}-day" data-d="${esc(d)}" aria-pressed="${sel}" ${t ? 'disabled' : ''} aria-label="${dname(d)}${t ? ', already has it' : ''}">
+      <span class="m-day-n">${shortDay(d)}</span><span class="m-day-d">${t ? 'has it' : pretty(d)}</span></button>`;
+  }).join('')}</div>`;
+}
+function renderCopyModal(m) {
+  const its = m.ids.map(findItem).filter(Boolean);
+  const single = its.length === 1;
+  const it = its[0];
+  const days = [...state.draft.days].sort();
+  const picked = [...m.days].sort();
+  const ref = single ? sharedRef(it)?.identifier : null;
+  const sub = single
+    ? `Same Linear issue${ref ? `, ${esc(ref)}` : ''}. Each day logs its own hours in Everhour.`
+    : `Each one stays one Linear issue. Every new day starts with its issue's hours.`;
+  return `<form id="copyform" novalidate>
+    <div class="m-head"><h2 id="modal-title">${single ? `Log <span class="m-q">${esc(it.title)}</span> on more days` : `Copy ${plural(its.length, 'issue')} to more days`}</h2><p class="m-sub">${sub}</p></div>
+    <div class="m-body m-form">
+      <div class="m-field">
+        <span class="m-label" id="copy-days-label">Days</span>
+        ${dayChips('copy', days, d => m.days.has(d), d => copyTaken(m, d))}
+      </div>
+      ${single ? `<div class="m-field">
+        <label for="copy-hours">Hours each day</label>
+        <input id="copy-hours" class="m-input m-hours" inputmode="decimal" value="${esc(m.hours)}" placeholder="Itemise decides" autocomplete="off">
+        <span class="m-faint">${m.hours.trim() ? 'Locked, so Itemise leaves them alone. Change or unlock any day later.' : 'Leave it empty and Itemise balances the new days with the rest of the week.'}</span>
+      </div>` : ''}
+      ${m.error ? `<div class="m-error" role="alert"><div>${esc(m.error)}</div></div>` : ''}
+    </div>
+    <div class="m-foot">
+      <span class="m-faint m-foot-note">${picked.length ? `Adds ${picked.map(shortDay).join(', ')}` : 'Pick one or more days'}</span>
+      <button type="button" class="m-btn" id="modal-cancel" data-act="modal-cancel" ${m.busy ? 'disabled' : ''}>Cancel</button>
+      <button type="submit" class="m-btn solid" id="modal-ok" ${m.busy || !picked.length ? 'disabled' : ''}>${m.busy ? 'Copying…' : picked.length > 1 ? `Copy to ${picked.length} days` : 'Copy'}</button>
     </div>
   </form>`;
 }
@@ -795,10 +921,11 @@ function renderBulk() {
     <span class="bulk-count"><strong>${its.length}</strong> picked</span><span class="bulk-sep" aria-hidden="true"></span>
     <div class="bulk-sel">${select('bulk-project', projectOptions(), same('project'), v => bulkSet('project', v), { placeholder: 'Move to project', label: 'Move picked issues to a project', disabled: pushed > 0 })}</div>
     <div class="bulk-sel">${select('bulk-day', days.map(x => ({ v: x, label: dname(x), hint: state.draft.days.includes(x) ? '' : 'not counted' })), same('day'), v => bulkSet('day', v), { placeholder: 'Move to day', label: 'Move picked issues to a day', disabled: pushed > 0 })}</div>
-    <button class="btn" data-act="bulk-merge" ${pushed || its.length < 2 ? 'disabled' : ''}>Merge</button>
+    <button class="btn" data-act="bulk-copy">Copy to days</button>
+    <button class="btn" data-act="bulk-merge" ${pushed || its.length < 2 || its.some(multiDay) ? 'disabled' : ''}>Merge</button>
     <button class="btn danger" data-act="bulk-delete">Delete</button><span class="bulk-sep" aria-hidden="true"></span>
     <button class="btn ghost" data-act="bulk-clear">Clear <span class="kbd">esc</span></button>
-    ${pushed ? `<span class="bulk-note">${pushed} ${pushed === 1 ? 'is' : 'are'} already in Linear, so only Delete works.</span>` : ''}
+    ${pushed ? `<span class="bulk-note">${pushed} ${pushed === 1 ? 'is' : 'are'} already in Linear, so only Copy and Delete work.</span>` : ''}
   </div>`;
 }
 
@@ -817,7 +944,7 @@ function renderSetup() {
     <section class="col-setup" aria-label="Week setup">
       <div>
         <h1>${d.pushed ? `Week ${weekNo(d.week)} is printed` : 'Your week, itemised'}</h1>
-        <p class="lede">${act.length ? `${plural(act.length, 'issue')} across ${plural(projects, 'project')}, from ${plural(sessions, 'Claude session')} and ${plural(commits, 'commit')}.` : 'Nothing drafted for this week yet.'}</p>
+        <p class="lede">${act.length ? `${plural(new Set(act.map(homeIdOf)).size, 'issue')} across ${plural(projects, 'project')}, from ${plural(sessions, 'Claude session')} and ${plural(commits, 'commit')}.` : 'Nothing drafted for this week yet.'}</p>
       </div>
       <div class="setup-group">
         <label class="label" for="total" style="margin:0">Hours you worked</label>
@@ -855,7 +982,8 @@ function renderReceipt(feed) {
   const other = act.filter(i => !projectNames().includes(i.project)).reduce((s, i) => s + (i.hours ?? 0), 0);
   if (other) per.push(['No project', other]);
   const billable = act.filter(i => kindOf(i.project) === 'billable').reduce((s, i) => s + (i.hours ?? 0), 0);
-  const parentCount = new Set(act.filter(i => i.project).map(i => `${i.day}|${i.project}`)).size;
+  const parentCount = new Set(act.filter(i => i.project && !i.sameAs).map(i => `${i.day}|${i.project}`)).size;
+  const issueCount = new Set(act.map(homeIdOf)).size;
   const swatchFor = n => (n === 'No project' ? 'var(--bad-ink)' : color(n));
   const showPrint = (!d.pushed || unlogged().length > 0) && !state.ask;
   return `
@@ -877,7 +1005,7 @@ function renderReceipt(feed) {
           <div class="legend">${per.map(([n, h]) => `<span><span class="swatch" style="background:${swatchFor(n)}"></span><span class="n">${esc(n)}</span><span class="v">${fmt(h)}</span></span>`).join('')}</div>
           <div class="r-total"><span>Total</span><span>${fmt(sum)} h</span></div>
           <div class="r-sub"><span>You worked ${d.totalHours == null ? '—' : `${fmt(d.totalHours)} h`}</span><span>${sum ? Math.round((billable / sum) * 100) : 0}% billable</span></div>
-          <div class="foot-row"><span class="barcode" aria-hidden="true">W${weekNo(d.week)}-${all7[0].slice(0, 4)}</span><span>${plural(act.length, 'sub-issue')}<br>${plural(parentCount, 'parent')}</span></div>
+          <div class="foot-row"><span class="barcode" aria-hidden="true">W${weekNo(d.week)}-${all7[0].slice(0, 4)}</span><span>${plural(issueCount, 'sub-issue')}<br>${plural(parentCount, 'parent')}</span></div>
         </div>
         ${d.pushed ? '<div class="stamp">LOGGED</div>' : ''}
       </div></div>
@@ -894,48 +1022,60 @@ function renderDay(day) {
   const check = ids.length ? `<button class="r-check ${n && n < ids.length ? 'some' : ''}" data-act="pick-day" data-d="${esc(day.day)}" role="checkbox" aria-checked="${n === 0 ? 'false' : n === ids.length ? 'true' : 'mixed'}" aria-label="Pick every issue on ${dname(day.day)}"></button>` : '';
   const top = `<div class="r-row">${check}${head}</div>`;
   if (!open) return `<div class="r-day">${top}</div>`;
+  const adds = (askPreview()?.adds ?? []).filter(a => a.day === day.day);
+  const ghost = adds.map(a => `<div class="r-row"><span class="r-line pv-add"><span class="t">+ ${esc(a.title)}</span><span class="r-multi">${REPEAT}</span><span class="lead"></span><span class="h">${fmt(a.hours)}</span></span></div>`).join('');
   return `<div class="r-day">${top}${day.groups.map(g => {
+    if (g.key === k_SAME) return `<div class="r-parent same"><span class="r-multi">${REPEAT}</span><span>Also on other days</span></div>
+      ${g.items.map(renderLine).join('')}`;
     const parent = g.key ? state.draft.parents.find(p => p.key === `${day.day}|${g.key}`) : null;
     const label = g.key ? esc(parentTitle(day.day, g.key)) : 'No project yet';
     return `<div class="r-parent"><span class="swatch" style="background:${g.key ? color(g.key) : 'var(--bad-ink)'}"></span><span>${label}</span>${parent?.linear?.created ? `<span class="pid">${linearLink(parent.linear)}</span>` : ''}</div>
       ${g.items.map(renderLine).join('')}`;
-  }).join('')}</div>`;
+  }).join('')}${ghost}</div>`;
 }
 
+const REPEAT = '<svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 7V6a3 3 0 0 1 3-3h8m-2.5-2 2.5 2-2.5 2M13.5 9v1a3 3 0 0 1-3 3h-8m2.5 2-2.5-2 2.5-2"/></svg>';
 function renderLine(i) {
   const pv = askPreview();
   const cls = ['r-line', i.id === state.sel && !state.ask ? 'sel' : '', pv?.touched.has(i.id) ? 'pv-change' : '', pv?.gone.has(i.id) ? 'pv-gone' : '', i.project ? '' : 'unassigned', isPushed(i) ? 'pushed' : '', state.mergeFrom === i.id ? 'mark-merge' : ''].filter(Boolean).join(' ');
   const hours = `${isPushed(i) && i.linear.identifier ? `${esc(i.linear.identifier)} ` : ''}${i.locked ? '* ' : ''}${fmt(i.hours)}`;
   const picked = state.picked.has(i.id);
   return `<div class="r-row ${picked ? 'picked' : ''}"><button class="r-check" data-act="pick-toggle" data-id="${esc(i.id)}" role="checkbox" aria-checked="${picked}" aria-label="Pick ${esc(i.title)}"></button><button class="${cls}" data-act="pick" data-id="${esc(i.id)}" aria-pressed="${i.id === state.sel}" draggable="${!isFrozen(i)}">
-    <span class="t">${esc(i.title)}</span><span class="lead"></span><span class="h ${state.flash.has(i.id) ? 'flash' : ''}">${hours}</span></button></div>`;
+    <span class="t">${esc(i.title)}</span>${multiDay(i) ? `<span class="r-multi" title="One Linear issue on ${groupOf(i).map(x => shortDay(x.day)).join(', ')}" aria-label="also on ${groupOf(i).filter(x => x.id !== i.id).map(x => dname(x.day)).join(', ')}">${REPEAT}</span>` : ''}<span class="lead"></span><span class="h ${state.flash.has(i.id) ? 'flash' : ''}">${hours}</span></button></div>`;
 }
 
 function renderEditor() {
   const it = findItem(state.sel);
   if (!it) return '<section class="col-editor" aria-label="Issue editor"><div class="ed-empty"><h2>No issue selected</h2><p class="muted" style="margin:0">Pick an issue on the receipt, or add one by hand.</p></div></section>';
-  const ro = isPushed(it), frozen = isFrozen(it);
-  const others = live().filter(i => i.id !== it.id && !isFrozen(i));
+  const ro = isPushed(it), frozen = isFrozen(it), fixed = sharedFixed(it);
+  const group = groupOf(it), multi = group.length > 1;
+  const others = multi ? [] : live().filter(i => i.id !== it.id && !isFrozen(i) && !multiDay(i));
   const days = weekDays(state.draft.week);
   const ev = it.evidence;
   const f = `data-for="${esc(it.id)}"`;
-  const source = ev.manual ? '<span class="chip">Added by hand</span>' : `<span class="chip">${plural(ev.commits.length, 'commit')}</span><span class="chip">${plural(ev.sessions.length, 'Claude session')}</span>`;
+  const source = it.sameAs ? `<span class="chip">Another day of ${esc(sharedRef(it)?.identifier ?? `${shortDay(homeOfItem(it).day)}'s issue`)}</span>` : ev.manual ? '<span class="chip">Added by hand</span>' : `<span class="chip">${plural(ev.commits.length, 'commit')}</span><span class="chip">${plural(ev.sessions.length, 'Claude session')}</span>`;
   return `
     <section class="col-editor" aria-label="Issue editor" data-keep-scroll="editor">
       <div class="ed-head"><span class="faint">${dname(it.day)}${it.project ? ` in ${esc(it.project)}` : ''}</span>${ro ? `<span class="chip">In Linear as <span class="linear-id">${linearLink(it.linear)}</span></span>` : (it.locked ? '<span class="chip">Hours locked</span>' : '')}</div>
       <div class="ed-field">
         <label class="sr-only" for="ed-title">Title</label>
-        <input class="ed-input" id="ed-title" ${f} value="${esc(it.title)}" autocomplete="off" ${ro ? 'disabled' : ''} ${ro ? 'aria-describedby="ed-title-hint"' : 'placeholder="Two or three words"'}>
-        ${ro ? `<span class="faint" id="ed-title-hint" style="margin-top:8px">Already in Linear${it.everhour?.logged ? ' and Everhour' : ''}, so only delete works on it.</span>` : ''}
+        <input class="ed-input" id="ed-title" ${f} value="${esc(it.title)}" autocomplete="off" ${fixed ? 'disabled aria-describedby="ed-title-hint"' : 'placeholder="Two or three words"'}>
+        ${ro ? `<span class="faint" id="ed-title-hint" style="margin-top:8px">Already in Linear${it.everhour?.logged ? ' and Everhour' : ''}, so you can only copy it to more days or delete it.</span>`
+          : fixed ? `<span class="faint" id="ed-title-hint" style="margin-top:8px">${esc(sharedRef(it)?.identifier ?? 'The issue')} is already in Linear, so the title, description and project are set. This day's hours and day can still change.</span>` : ''}
       </div>
-      <div class="ed-field"><label class="label" for="ed-desc">What you did</label><textarea class="ed-text" id="ed-desc" ${f} ${ro ? 'disabled' : ''}>${esc(it.description)}</textarea></div>
+      <div class="ed-field"><label class="label" for="ed-desc">What you did</label><textarea class="ed-text" id="ed-desc" ${f} ${fixed ? 'disabled' : ''}>${esc(it.description)}</textarea></div>
       <div class="ed-field">
         <div class="two-col">
-          <div><span class="label">Project</span>${select('ed-project', projectOptions(), it.project, v => setField(it, 'project', v), { disabled: ro, placeholder: 'Pick a project', label: 'Project' })}</div>
+          <div><span class="label">Project</span>${select('ed-project', projectOptions(), it.project, v => setField(it, 'project', v), { disabled: fixed, placeholder: 'Pick a project', label: 'Project' })}</div>
           <div><span class="label">Day</span>${select('ed-day', days.map(x => ({ v: x, label: dname(x), hint: state.draft.days.includes(x) ? '' : 'not counted' })), it.day, v => setField(it, 'day', v), { disabled: ro, label: 'Day' })}</div>
         </div>
         <span class="faint" style="margin-top:8px">${it.project ? `Why ${esc(it.project)}` : 'Why unsure'}: ${esc(it.bucketReason || 'no reason given')}</span>
       </div>
+      ${multi ? `<div class="ed-field">
+        <span class="label">One Linear issue on ${group.length} days</span>
+        <div class="chips">${group.map(m => `<button class="chip day-chip ${m.id === it.id ? 'on' : ''}" data-act="goto" data-id="${esc(m.id)}" aria-pressed="${m.id === it.id}">${shortDay(m.day)}<span class="day-chip-h">${fmt(m.hours)}</span></button>`).join('')}</div>
+        <span class="faint" style="margin-top:8px">The title, description and project change on every day. Hours, lock and day belong to this day only.</span>
+      </div>` : ''}
       <div class="ed-field">
         <span class="label">Hours</span>
         <div class="stepper">
@@ -952,11 +1092,13 @@ function renderEditor() {
         <span class="faint" style="margin-top:8px">${it.weight != null ? `Effort ${Math.round(it.weight * 10) / 10} of 10${it.weightReason ? `: ${esc(it.weightReason)}` : ''}.` : 'Effort not estimated yet.'}</span>
       </div>
       <div class="divider"></div>
-      ${frozen ? `<div class="actions"><button class="btn danger" data-act="delete-pushed">Delete issue</button><span class="faint">Moves it to Linear's trash and clears its Everhour time. You confirm first.</span></div>` : `<div class="actions">
-        <div class="wide">${select('ed-merge', others.map(o => ({ v: o.id, label: o.title, hint: dname(o.day).slice(0, 3), color: o.project ? color(o.project) : 'var(--bad-ink)' })), null, v => mergeInto(it.id, v), { placeholder: 'Merge another issue into this one', label: 'Merge another issue into this one', disabled: !others.length })}</div>
-        <button class="btn" data-act="split">Split in two <span class="kbd">s</span></button>
+      ${frozen ? `<div class="actions"><button class="btn" data-act="copy">Copy to other days <span class="kbd">c</span></button><span class="spacer"></span><button class="btn danger" data-act="delete-pushed">${multi ? 'Delete this day' : 'Delete issue'}</button></div>
+        <span class="faint" style="margin-top:12px;display:block">${multi ? "Delete clears this day's hours in Everhour. The Linear issue stays for its other days." : "Delete moves it to Linear's trash and clears its Everhour time. You confirm first."}</span>` : `<div class="actions">
+        ${multi ? '' : `<div class="wide">${select('ed-merge', others.map(o => ({ v: o.id, label: o.title, hint: shortDay(o.day), color: o.project ? color(o.project) : 'var(--bad-ink)' })), null, v => mergeInto(it.id, v), { placeholder: 'Merge another issue into this one', label: 'Merge another issue into this one', disabled: !others.length })}</div>`}
+        <button class="btn" data-act="copy">Copy to other days <span class="kbd">c</span></button>
+        ${multi ? '' : '<button class="btn" data-act="split">Split in two <span class="kbd">s</span></button>'}
         <span class="spacer"></span>
-        <button class="btn danger ${state.armedDelete === it.id ? 'armed' : ''}" data-act="delete">${state.armedDelete === it.id ? 'Press again to delete' : 'Delete issue'}</button>
+        <button class="btn danger ${state.armedDelete === it.id ? 'armed' : ''}" data-act="delete">${state.armedDelete === it.id ? 'Press again to delete' : multi ? 'Delete this day' : 'Delete issue'}</button>
       </div>`}
     </section>`;
 }
@@ -969,7 +1111,10 @@ function newPrint(draft, stage) {
   return {
     week: draft.week, stage, ehHours: null, lastPhase: 'parents', seen: new Map(),
     ids: pending.map(i => i.id),
-    parents: new Set(pending.filter(i => i.project).map(i => `${i.day}|${i.project}`)).size,
+    // days of one issue share it: only homes become new sub-issues, and each issue syncs once
+    issues: pending.filter(i => !i.sameAs).length,
+    distinct: new Set(pending.map(i => i.sameAs ?? i.id)).size,
+    parents: new Set(pending.filter(i => i.project && !i.sameAs).map(i => `${i.day}|${i.project}`)).size,
     hours: pending.reduce((s, i) => s + (i.hours ?? 0), 0),
     projects: [...new Set(pending.map(i => i.project).filter(Boolean))],
   };
@@ -1073,7 +1218,7 @@ function renderPrint() {
   const phase = status === 'awaiting_sync' ? 'sync' : status === 'running' ? (p.phase ?? 'parents') : pr.lastPhase;
   const at = PHASES.indexOf(phase);
   const stepState = k => (status === 'done' || PHASES.indexOf(k) < at ? 'done' : PHASES.indexOf(k) === at ? 'now' : '');
-  const totalFor = k => (k === 'parents' ? pr.parents : pr.ids.length);
+  const totalFor = k => (k === 'parents' ? pr.parents : k === 'issues' ? pr.issues : k === 'sync' ? pr.distinct : pr.ids.length);
   const count = k => {
     const s = stepState(k);
     if (s === 'done') return k === 'time' ? `${fmt(pr.hours)} h` : `${totalFor(k)} of ${totalFor(k)}`;
@@ -1093,7 +1238,7 @@ function renderPrint() {
     const q = status === 'confirm' ? `Print week ${n}?`
       : pr.ehHours == null ? `Couldn't read Everhour for week ${n}. Print anyway?`
         : `Everhour already has ${fmt(pr.ehHours)} h for you in week ${n}. Print anyway?`;
-    panel = `<div class="callout"><strong style="font-size:17px">${q}</strong><div>Creates ${plural(pr.parents, 'parent issue')} and ${plural(pr.ids.length, 'sub-issue')} in Linear across ${plural(pr.projects.length, 'project')}, assigned to you and set to Done, then logs ${fmt(pr.hours)} h in Everhour.</div><div class="row"><button class="btn ink" data-act="${status === 'confirm' ? 'print-go' : 'print-anyway'}" ${pr.starting ? 'disabled' : ''}>${status === 'confirm' ? 'Print' : 'Print anyway'} <span class="kbd">y</span></button><button class="btn" data-act="print-cancel">Not now <span class="kbd">n</span></button></div></div>`;
+    panel = `<div class="callout"><strong style="font-size:17px">${q}</strong><div>${pr.issues ? `Creates ${plural(pr.parents, 'parent issue')} and ${plural(pr.issues, 'sub-issue')} in Linear across ${plural(pr.projects.length, 'project')}, assigned to you and set to Done, then logs ${fmt(pr.hours)} h in Everhour.` : `Logs ${fmt(pr.hours)} h in Everhour on issues already in Linear. Nothing new is created there.`}${pr.ids.length > pr.distinct ? ` Some issues log hours on several days.` : ''}</div><div class="row"><button class="btn ink" data-act="${status === 'confirm' ? 'print-go' : 'print-anyway'}" ${pr.starting ? 'disabled' : ''}>${status === 'confirm' ? 'Print' : 'Print anyway'} <span class="kbd">y</span></button><button class="btn" data-act="print-cancel">Not now <span class="kbd">n</span></button></div></div>`;
   } else if (status === 'awaiting_sync') {
     panel = `<div class="callout"><strong style="font-size:17px">One click in Everhour</strong><div>Everhour can't pull new Linear issues by itself. Open Everhour, go to Projects, and press Sync on each of these:</div><div class="row">${syncProjects.map(projTag).join('')}</div><div class="row"><button class="btn ink" data-act="synced" ${pr.starting ? 'disabled' : ''}>I pressed Sync, log the hours</button><a class="btn" style="text-decoration:none" href="https://app.everhour.com/" target="_blank" rel="noopener">Open Everhour</a><button class="btn" data-act="print-cancel">Later</button></div></div>`;
   } else if (status === 'error') {
@@ -1110,7 +1255,7 @@ function renderPrint() {
     running: phase === 'time' ? 'Logging hours in Everhour.' : 'Creating issues in Linear. Safe to run again if it stops.',
     awaiting_sync: 'Linear has every issue. Everhour needs one click from you before the hours can go in.',
     error: 'Everything done so far is saved. Printing again picks up where it stopped.',
-    done: `${plural(pr.ids.length, 'sub-issue')} under ${plural(pr.parents, 'parent')} are in Linear, and ${fmt(pr.hours)} h are in Everhour. Printing again changes nothing.`,
+    done: `${plural(pr.distinct, 'sub-issue')} under ${plural(pr.parents, 'parent')} are in Linear, and ${fmt(pr.hours)} h are in Everhour. Printing again changes nothing.`,
   }[status];
   const showSteps = status !== 'blocked' && status !== 'confirm' && status !== 'everhour';
 
@@ -1123,7 +1268,7 @@ function renderPrint() {
     const key = `${ident}|${on}`;
     const appear = !firstPaint && pr.seen.get(i.id) !== key;
     pr.seen.set(i.id, key);
-    return `<div class="p-row ${appear ? 'appear' : ''}"><span class="swatch" style="background:${color(i.project)}"></span><span class="w">${ident ? linearLink(i.linear) : '·······'}</span><span class="t">${esc(i.title)}</span><span class="h ${on ? 'on' : 'wait'}">${on ? fmt(i.hours) : 'waiting'}</span></div>`;
+    return `<div class="p-row ${appear ? 'appear' : ''}"><span class="swatch" style="background:${color(i.project)}"></span><span class="w">${ident ? linearLink(i.linear) : '·······'}</span><span class="t">${esc(i.title)}${multiDay(i) ? ` <span class="p-day">${shortDay(i.day)}</span>` : ''}</span><span class="h ${on ? 'on' : 'wait'}">${on ? fmt(i.hours) : 'waiting'}</span></div>`;
   }).join('');
 
   $('#view').innerHTML = `
@@ -1295,10 +1440,23 @@ document.addEventListener('click', e => {
     case 'pick-toggle': togglePick(t.dataset.id, e.shiftKey); break;
     case 'pick-day': pickDay(t.dataset.d); break;
     case 'bulk-merge': bulkMerge(); break;
-    case 'bulk-delete': { const its = pickedItems(); if (its.length === 1 && !isFrozen(its[0])) { act('/api/delete', { id: its[0].id }).then(d => d && toast("Issue deleted. /timesheet won't redraft it.")); } else requestDelete(its.map(i => i.id)); break; }
+    case 'bulk-copy': openCopy(pickedItems().map(i => i.id)); break;
+    case 'copy': if (it) openCopy([it.id]); break;
+    case 'goto': selectLine(t.dataset.id); break;
+    case 'add-day': case 'copy-day': {
+      const m = state.modal;
+      if (!m?.days) break;
+      const d = t.dataset.d;
+      if (m.days.has(d)) m.days.delete(d); else m.days.add(d);
+      m.error = null; m.daysError = null;
+      render();
+      document.querySelector(`.m-day[data-d="${CSS.escape(d)}"]`)?.focus();
+      break;
+    }
+    case 'bulk-delete': { const its = pickedItems(); if (its.length === 1 && !needsRemote(its[0])) { act('/api/delete', { id: its[0].id }).then(d => d && toast("Issue deleted. /timesheet won't redraft it.")); } else requestDelete(its.map(i => i.id)); break; }
     case 'bulk-clear': clearPicked(); break;
     case 'delete-pushed': if (it) requestDelete([it.id]); break;
-    case 'modal-back': if (state.modal?.kind === 'add' && (state.modal.title.trim() || state.modal.desc.trim())) break; closeModal(); break; // a stray click shouldn't lose what was typed
+    case 'modal-back': if (state.modal?.kind === 'add' && (state.modal.title.trim() || state.modal.desc.trim() || state.modal.hours.trim())) break; closeModal(); break; // a stray click shouldn't lose what was typed
     case 'modal-cancel': closeModal(); break;
     case 'modal-ok': runConfirm(); break;
     case 'ask-cmd': runAskCommand(+t.dataset.k); break;
@@ -1351,9 +1509,9 @@ document.addEventListener('change', e => {
 });
 
 document.addEventListener('submit', e => {
-  if (e.target.id !== 'addform') return;
+  if (e.target.id !== 'addform' && e.target.id !== 'copyform') return;
   e.preventDefault();
-  submitAdd();
+  if (e.target.id === 'addform') submitAdd(); else submitCopy();
 });
 
 /** Keys while the confirm dialog is open: Esc closes and Tab stays inside. */
@@ -1384,6 +1542,8 @@ function askKey(e) {
 
 document.addEventListener('input', e => {
   const m = state.modal;
+  if (m?.kind === 'add' && e.target.id === 'add-hours') { m.hours = e.target.value; return; }
+  if (m?.kind === 'copy' && e.target.id === 'copy-hours') { m.hours = e.target.value; return; }
   if (m?.kind === 'add' && (e.target.id === 'add-title' || e.target.id === 'add-desc')) {
     m[e.target.id === 'add-title' ? 'title' : 'desc'] = e.target.value;
     if (m.error && m.title.trim()) { m.error = null; e.target.removeAttribute('aria-invalid'); document.getElementById('add-err')?.remove(); }
@@ -1445,9 +1605,10 @@ document.addEventListener('keydown', e => {
   else if (k === 'L' && editable) setField(it, 'locked', !it.locked);
   else if (k === 's' && editable) splitLine(it);
   else if (k === 'm' && editable) toggleMark(it);
-  else if (k === 'd' && editable) deleteLine(it);
+  else if (k === 'd' && editable && !needsRemote(it)) deleteLine(it);
   else if (k === 'd' && it) requestDelete([it.id]);
   else if (k === 'x' && it) togglePick(it.id);
+  else if (k === 'c' && it) { e.preventDefault(); openCopy(state.picked.size ? pickedItems().map(i => i.id) : [it.id]); }
   else if (k === 'a') { e.preventDefault(); openAdd(); }
   else if (k === 'D') distribute(false);
   else if (k === 'P') requestPush();

@@ -22,6 +22,7 @@ export function show(weekArg?: string): void {
     issues: d.items.filter(i => !i.deleted).map(i => ({
       id: i.id, title: i.title, description: i.description, project: i.project, day: i.day, hours: i.hours, locked: i.locked,
       inLinear: i.linear ? (i.linear.identifier ?? true) : false, logged: !!i.everhour?.logged,
+      ...(i.sameAs ? { sameIssueAs: i.sameAs } : {}),
     })),
   }, null, 1));
 }

@@ -39,6 +39,8 @@ export interface Item {
   deleted: boolean;
   linear: LinearRef | null;
   everhour: { logged: boolean } | null;
+  /** Set on a copy: the id of the item whose Linear issue it shares. Each copy logs its own day's hours on that issue. */
+  sameAs?: string | null;
 }
 
 export interface Parent { key: string; title: string; description: string; edited: boolean; linear: LinearRef | null }
