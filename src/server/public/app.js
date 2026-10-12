@@ -39,13 +39,15 @@ const state = {
   tab: 'week', sel: null, mergeFrom: null, armedDelete: null, collapsed: new Set(), flash: new Set(), fed: false,
   adding: false, addProject: null, addDay: null,
   everhour: undefined, // undefined: still asking, null: couldn't read, number: hours
-  saving: false, saveFailed: false, saveError: null, busy: null, toast: '', help: false, palette: false,
+  saving: false, saveFailed: false, saveError: null, busy: null, toast: '', help: false,
+  picked: new Set(), pickAnchor: null, // issues picked for a bulk change; `sel` stays the one in the editor
+  modal: null, modalReturn: null, // { kind: 'palette' | 'confirm' | 'assist', ... }
   openSel: null, selActive: 0,
   print: null, settings: null, settingsSaving: false, history: null, loadError: null,
 };
 
-async function api(method, url, body) {
-  const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined });
+async function api(method, url, body, signal) {
+  const r = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined, signal });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw Object.assign(new Error(j.error || r.statusText), { status: r.status, body: j });
   return j;
@@ -82,6 +84,7 @@ function groupedDays() {
     return { day, counted: counted.includes(day), total: its.reduce((s, i) => s + (i.hours ?? 0), 0), count: its.length, groups: keys.map(k => ({ key: k, items: its.filter(i => (i.project ?? '') === k) })) };
   }).filter(d => d.counted || d.count);
 }
+const receiptOrder = () => groupedDays().flatMap(d => d.groups.flatMap(g => g.items));
 const visibleLines = () => groupedDays().filter(d => !state.collapsed.has(d.day)).flatMap(d => d.groups.flatMap(g => g.items));
 
 // ---------- loading and saving ----------
@@ -93,6 +96,7 @@ function accept(res, draft = res.draft) {
   const changed = res.draft.items.filter(i => before.has(i.id) && before.get(i.id) !== i.hours).map(i => i.id);
   if (changed.length) { state.flash = new Set(changed); setTimeout(() => { state.flash = new Set(); }, 1100); }
   if (!findItem(state.sel)) state.sel = live().find(i => !isPushed(i))?.id ?? live()[0]?.id ?? null;
+  for (const id of state.picked) if (!findItem(id)) state.picked.delete(id);
   render();
 }
 
@@ -101,6 +105,7 @@ async function load(week) {
   const fresh = !state.draft || s.week !== state.week;
   if (s.week !== state.week) {
     state.sel = null; state.mergeFrom = null; state.armedDelete = null; state.adding = false; state.collapsed = new Set(); state.fed = false;
+    state.picked = new Set(); state.pickAnchor = null; state.modal = null;
     if (state.print && state.print.week !== s.week) state.print = null;
   }
   state.week = s.week; state.weeks = s.weeks; state.projects = s.projects; state.push = s.push; state.loadError = null;
@@ -254,14 +259,14 @@ async function mergeInto(firstId, otherId) {
 }
 async function deleteLine(it) {
   if (!it || isFrozen(it)) return;
-  if (state.armedDelete !== it.id) { state.armedDelete = it.id; render(); toast('Press again to delete.'); return; }
+  if (state.armedDelete !== it.id) { state.armedDelete = it.id; render(); toast('Press again to delete this issue.'); return; }
   state.armedDelete = null;
-  if (await act('/api/delete', { id: it.id })) toast('Line deleted.');
+  if (await act('/api/delete', { id: it.id })) toast("Issue deleted. /timesheet won't redraft it.");
 }
 function toggleMark(it) {
   if (!it || isFrozen(it)) return;
   if (state.mergeFrom && state.mergeFrom !== it.id) return mergeInto(state.mergeFrom, it.id);
-  state.mergeFrom = it.id; render(); toast('Marked. Press m on another line to merge.');
+  state.mergeFrom = it.id; render(); toast('Marked. Press m on another issue to merge.');
 }
 function selectLine(id, scroll = true) {
   const line = findItem(id);
@@ -278,14 +283,231 @@ function openAdd() {
 }
 async function submitAdd() {
   const title = $('#add-title').value.trim();
-  if (!title) return toast('Give the line a title.');
+  if (!title) return toast('Give the issue a title.');
   const days = state.draft.days.length ? state.draft.days : weekDays(state.week);
   const before = new Set(state.draft.items.map(i => i.id));
   const d = await act('/api/items', { title, description: $('#add-desc').value, project: state.addProject ?? projectNames()[0] ?? null, day: state.addDay ?? findItem(state.sel)?.day ?? days[0] });
   if (!d) return;
   state.adding = false;
   state.sel = d.items.find(i => !before.has(i.id))?.id ?? state.sel;
-  render(); toast('Line added. Press Itemise to give it hours.');
+  render(); toast('Issue added. Press Itemise to give it hours.');
+}
+
+// ---------- picking several issues ----------
+const pickedItems = () => receiptOrder().filter(i => state.picked.has(i.id));
+/** Shift picks the range from the last picked issue, in receipt order. */
+function togglePick(id, range = false) {
+  const order = visibleLines().map(i => i.id);
+  if (range && state.pickAnchor && order.includes(state.pickAnchor) && order.includes(id)) {
+    const [a, b] = [order.indexOf(state.pickAnchor), order.indexOf(id)].sort((x, y) => x - y);
+    for (const x of order.slice(a, b + 1)) state.picked.add(x);
+  } else if (state.picked.has(id)) state.picked.delete(id);
+  else state.picked.add(id);
+  state.pickAnchor = id;
+  render();
+}
+function pickDay(day) {
+  const ids = live().filter(i => i.day === day).map(i => i.id);
+  const all = ids.every(id => state.picked.has(id));
+  for (const id of ids) { if (all) state.picked.delete(id); else state.picked.add(id); }
+  render();
+}
+function clearPicked() { state.picked = new Set(); state.pickAnchor = null; render(); }
+
+/** POST /api/bulk after pending edits are saved. Returns the response, or null after saying why it failed. */
+async function bulk(ops, rev) {
+  if (!(await save())) return null;
+  const sent = structuredClone(state.draft);
+  try {
+    const res = await api('POST', '/api/bulk', { week: state.week, rev: rev ?? state.base.rev, ops });
+    acceptCarrying(res, sent);
+    return res;
+  } catch (e) {
+    if (e.status === 409) { await load(state.week).catch(() => {}); toast(rev != null ? 'The week changed while Claude was thinking. Ask again.' : e.message); } else toast(e.message);
+    return null;
+  }
+}
+async function bulkSet(field, value) {
+  const ids = pickedItems().map(i => i.id);
+  if (!ids.length) return;
+  const res = await bulk([{ op: 'set', ids, [field]: value }]);
+  if (res) toast(`${res.summary.join('. ')}.`);
+}
+async function doMerge(ids) {
+  const res = await bulk([{ op: 'merge', ids }]);
+  if (!res) return false;
+  state.sel = ids[0]; state.picked = new Set(); render();
+  toast(`Merged ${plural(ids.length, 'issue')}.`);
+  return true;
+}
+function bulkMerge() {
+  const its = pickedItems();
+  if (its.length < 2) return toast('Pick at least 2 issues to merge.');
+  const [first] = its;
+  if (its.every(i => i.day === first.day && i.project === first.project)) return doMerge(its.map(i => i.id));
+  openModal({
+    kind: 'confirm', title: `Merge ${plural(its.length, 'issue')}?`, ok: 'Merge',
+    body: `<p>They become one issue, <strong>${esc(first.title)}</strong>, on ${dname(first.day)} in ${esc(first.project ?? 'no project')}.</p><p class="m-faint">The others are on a different day or project, so they move there.</p>`,
+    run: () => doMerge(its.map(i => i.id)),
+  });
+}
+
+/** Deletes issues after a confirm. Pushed ones are also trashed in Linear and their hours cleared in Everhour. */
+function requestDelete(ids) {
+  const its = ids.map(findItem).filter(Boolean);
+  if (!its.length) return;
+  const pushed = its.filter(isFrozen), local = its.filter(i => !isFrozen(i));
+  const gone = new Set(its.map(i => i.id));
+  const emptied = [...new Set(pushed.filter(i => i.project).map(i => `${i.day}|${i.project}`))]
+    .filter(key => live().every(i => `${i.day}|${i.project}` !== key || gone.has(i.id)))
+    .map(key => state.draft.parents.find(p => p.key === key)).filter(p => p?.linear);
+  const row = i => `<li><span class="m-id">${esc(i.linear?.identifier ?? '·····')}</span><span class="m-t">${esc(i.title)}</span><span class="m-h">${i.everhour?.logged ? `${fmt(i.hours)} h · ${dname(i.day).slice(0, 3)}` : 'no hours yet'}</span></li>`;
+  let localDone = !local.length;
+  openModal({
+    kind: 'confirm', danger: true, focusCancel: pushed.length > 0,
+    title: `Delete ${plural(its.length, 'issue')}?`,
+    ok: pushed.length ? 'Delete from Linear and Everhour' : `Delete ${plural(its.length, 'issue')}`,
+    body: [
+      local.length ? `<p>${local.length === its.length ? (local.length === 1 ? 'It comes' : 'They come') : `${plural(local.length, 'issue')} come`} off this week. /timesheet won't draft ${local.length === 1 ? 'it' : 'them'} again.</p>` : '',
+      pushed.length ? `<p>${pushed.length === 1 ? (its.length === 1 ? 'It is' : 'One is') : `${pushed.length === its.length ? '' : 'These '}${plural(pushed.length, 'issue')} are`} already printed. ${pushed.length === 1 ? 'It goes' : 'Each one goes'} to Linear's trash (you can restore it there for 30 days) and its hours are cleared in Everhour:</p><ul class="m-list">${pushed.map(row).join('')}</ul>` : '',
+      emptied.length ? `<p>That leaves ${emptied.length === 1 ? 'a parent' : 'parents'} with nothing under ${emptied.length === 1 ? 'it' : 'them'}, so ${emptied.map(p => `<strong>${esc(p.linear.identifier ?? p.title)}</strong>`).join(', ')} ${emptied.length === 1 ? 'goes' : 'go'} to the trash too.</p>` : '',
+    ].join(''),
+    run: async () => {
+      if (!localDone) {
+        if (!(await bulk([{ op: 'delete', ids: local.map(i => i.id) }]))) return false;
+        localDone = true;
+      }
+      if (pushed.length) return removeRemote(pushed.map(i => i.id));
+      toast(`Deleted ${plural(local.length, 'issue')}. /timesheet won't redraft ${local.length === 1 ? 'it' : 'them'}.`);
+      return true;
+    },
+  });
+}
+async function removeRemote(ids) {
+  if (!(await save())) return false;
+  const sent = structuredClone(state.draft);
+  try {
+    const res = await api('POST', '/api/remove', { week: state.week, ids, confirm: true });
+    acceptCarrying(res, sent);
+    loadEverhour(state.week);
+    if (res.failed.length) {
+      const name = id => { const i = state.draft.items.find(x => x.id === id); return i ? (i.linear?.identifier ?? i.title) : `the parent for ${id.replace('|', ', ')}`; };
+      if (state.modal) { state.modal.error = res.failed.map(f => `${name(f.id)}: ${f.error}`); state.modal.ok = 'Try again'; }
+      if (res.removed.length) toast(`Deleted ${plural(res.removed.length, 'issue')}. ${plural(res.failed.length, 'step')} failed.`);
+      return false;
+    }
+    toast(`Deleted ${plural(res.removed.length, 'issue')} from Linear and Everhour${res.parents.length ? `, plus ${plural(res.parents.length, 'empty parent')}` : ''}.`);
+    return true;
+  } catch (e) {
+    if (state.modal) { state.modal.error = [e.message]; state.modal.ok = 'Try again'; }
+    return false;
+  }
+}
+
+// ---------- modal: confirm, command palette, Ask Claude ----------
+function openModal(m) {
+  if (!state.modal) state.modalReturn = document.activeElement?.id || null;
+  state.modal = m; state.help = false; state.openSel = null;
+  render();
+  focusModal();
+}
+function focusModal() {
+  const m = state.modal;
+  if (!m) return;
+  const want = m.kind === 'palette' ? '#paletteinput' : m.kind === 'assist' ? (m.status === 'answer' ? '#assist-apply' : m.status === 'thinking' ? '#assist-cancel' : '#assistinput') : m.focusCancel ? '#modal-cancel' : '#modal-ok';
+  (document.querySelector(want) ?? document.querySelector('.modal button'))?.focus();
+}
+function closeModal() {
+  const m = state.modal;
+  if (!m || m.busy) return;
+  m.ctl?.abort();
+  state.modal = null;
+  render();
+  if (state.modalReturn) document.getElementById(state.modalReturn)?.focus();
+}
+async function runConfirm() {
+  const m = state.modal;
+  if (!m || m.kind !== 'confirm' || m.busy) return;
+  m.busy = true; m.error = null; render();
+  let ok = false;
+  try { ok = await m.run(); } finally { m.busy = false; }
+  if (state.modal !== m) return;
+  if (ok) closeModal(); else { render(); focusModal(); }
+}
+
+const COMMANDS = [
+  { id: 'itemise', label: 'Itemise hours', key: 'D', words: 'distribute split total', run: () => distribute(false) },
+  { id: 'reweight', label: 'Re-estimate effort and itemise', words: 'reweight weights', run: () => distribute(true) },
+  { id: 'print', label: 'Print to Linear and Everhour', key: 'P', words: 'push send', run: () => { state.tab = 'week'; requestPush(); } },
+  { id: 'add', label: 'Add an issue by hand', key: 'a', words: 'new manual', run: () => { if (state.tab !== 'week') switchTab('week'); openAdd(); } },
+  { id: 'pick-all', label: 'Pick every issue', words: 'select all bulk', run: () => { state.tab = 'week'; state.picked = new Set(live().map(i => i.id)); render(); } },
+  { id: 'week', label: 'This week', words: 'current receipt', run: () => switchTab('week') },
+  { id: 'history', label: 'Past weeks', words: 'history', run: () => switchTab('history') },
+  { id: 'settings', label: 'Settings', words: 'repos projects orgs reminder', run: () => switchTab('settings') },
+  { id: 'help', label: 'Keyboard shortcuts', key: '?', words: 'help keys', run: () => { state.help = true; renderOverlay(); } },
+];
+function paletteRows(q) {
+  const t = q.trim().toLowerCase();
+  const rows = [];
+  const wk = t.match(/^(?:go to )?week\s+(\d{4}-w\d{2}|last|this|next|previous|prev)$/);
+  if (wk) {
+    const w = wk[1];
+    const target = w === 'next' ? shiftWeek(state.week, 1) : w === 'previous' || w === 'prev' ? shiftWeek(state.week, -1) : w.toUpperCase();
+    rows.push({ id: 'goweek', label: `Go to week ${w === 'last' || w === 'this' ? w : weekNo(target)}`, run: () => goWeek(w === 'last' || w === 'this' ? w : target) });
+  }
+  const words = c => `${c.label} ${c.words}`.toLowerCase().split(/[^a-z0-9?]+/);
+  const tokens = t.split(/\s+/).filter(Boolean);
+  rows.push(...COMMANDS.filter(c => !tokens.length || tokens.every(tok => words(c).some(w => w.startsWith(tok)))));
+  if (t) {
+    const ask = { id: 'ask', label: 'Ask Claude', detail: q.trim(), run: () => askClaude(q.trim()) };
+    if (rows.length) rows.push(ask); else rows.unshift(ask);
+  }
+  return rows;
+}
+function openPalette() {
+  if (!state.draft) return;
+  openModal({ kind: 'palette', q: '', active: 0 });
+}
+function runPaletteRow(k) {
+  const m = state.modal;
+  const row = paletteRows(m.q)[k];
+  if (!row) return;
+  state.modal = null; render();
+  if (row.id !== 'ask' && state.modalReturn) document.getElementById(state.modalReturn)?.focus();
+  row.run();
+}
+
+async function askClaude(message, turns = []) {
+  if (!message) return;
+  const m = { kind: 'assist', turns, message, status: 'thinking', reply: '', ops: [], summary: [], remote: [], rev: null, ctl: new AbortController() };
+  openModal(m);
+  if (!(await save())) { m.status = 'error'; m.reply = `Your edits aren't saved yet (${state.saveError ?? 'unknown error'}), so Claude would see an old week.`; render(); return focusModal(); }
+  try {
+    const r = await api('POST', '/api/assist', { week: state.week, message, history: turns.slice(-3) }, m.ctl.signal);
+    if (state.modal !== m) return;
+    Object.assign(m, { status: r.ops.length ? 'answer' : 'note', reply: r.reply, ops: r.ops, summary: r.summary, remote: r.remote, rev: r.rev });
+  } catch (e) {
+    if (e.name === 'AbortError' || state.modal !== m) return;
+    m.status = 'error'; m.reply = e.message;
+  }
+  render(); focusModal();
+}
+function followUp(text) {
+  const m = state.modal;
+  if (!text.trim() || m?.kind !== 'assist') return;
+  askClaude(text.trim(), [...m.turns, { message: m.message, reply: m.reply }]);
+}
+async function applyAssist() {
+  const m = state.modal;
+  if (m?.kind !== 'assist' || m.status !== 'answer' || !m.ops.length) return;
+  m.status = 'applying'; m.busy = true; render();
+  const res = await bulk(m.ops, m.rev);
+  m.busy = false;
+  if (state.modal !== m) return;
+  if (!res) { m.status = 'answer'; render(); return focusModal(); }
+  state.modal = null; render();
+  if (res.remote.length) return requestDelete(res.remote);
+  toast(`Done. ${res.summary.join('. ')}.`);
 }
 
 // ---------- custom select ----------
@@ -352,11 +574,60 @@ function renderTop() {
 }
 function renderToast() { $('#toast').innerHTML = state.toast ? `<div class="toast" role="status">${esc(state.toast)}</div>` : ''; }
 
-const HELP = [['j / k', 'next / previous line'], ['e', 'edit the title'], ['p', 'next project'], ['[ / ]', 'half an hour less / more (locks the line)'], ['L', 'lock or unlock hours'], ['s', 'split in two'], ['m', 'mark, then m on another line to merge'], ['d d', 'delete the line'], ['a', 'add a line'], ['D', 'itemise hours'], ['P', 'print to Linear and Everhour'], ['/', 'command palette'], ['?', 'show or hide this']];
+const HELP = [['j / k', 'next / previous issue'], ['e', 'edit the title'], ['p', 'next project'], ['[ / ]', 'half an hour less / more (locks the issue)'], ['L', 'lock or unlock hours'], ['s', 'split in two'], ['m', 'mark, then m on another issue to merge'], ['d d', 'delete the issue'], ['x', 'pick the issue (shift-click picks a range)'], ['a', 'add an issue'], ['D', 'itemise hours'], ['P', 'print to Linear and Everhour'], ['/ or ⌘K', 'commands and Ask Claude'], ['?', 'show or hide this']];
 function renderOverlay() {
   const help = state.help ? `<div class="overlay" role="dialog" aria-label="Keyboard shortcuts"><strong>Keyboard</strong><dl>${HELP.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl></div>` : '';
-  const palette = state.palette ? `<div class="overlay palette" role="dialog" aria-label="Command palette"><input id="paletteinput" autocomplete="off" spellcheck="false" placeholder="itemise · reweight · print · week 2026-W40 · history · settings" aria-label="Command"><div class="faint">Enter runs it. Esc closes.</div></div>` : '';
-  $('#overlay').innerHTML = help + palette;
+  $('#overlay').innerHTML = help + renderModal();
+  document.querySelector('.pal-row.active')?.scrollIntoView({ block: 'nearest' });
+}
+
+const SPARK = '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 0c.4 3.9 2.1 5.6 6 6-3.9.4-5.6 2.1-6 6-.4-3.9-2.1-5.6-6-6 3.9-.4 5.6-2.1 6-6Zm5 10c.2 1.9 1 2.8 3 3-2 .2-2.8 1-3 3-.2-2-1-2.8-3-3 2-.2 2.8-1.1 3-3Z"/></svg>';
+function renderModal() {
+  const m = state.modal;
+  if (!m) return '';
+  const inner = m.kind === 'palette' ? renderPalette(m) : m.kind === 'assist' ? renderAssist(m) : renderConfirm(m);
+  return `<div class="modal-back" data-act="modal-back"></div>
+    <div class="modal ${m.kind}${m.danger ? ' danger' : ''}" role="dialog" aria-modal="true" aria-labelledby="modal-title">${inner}</div>`;
+}
+function renderConfirm(m) {
+  return `<div class="m-head"><h2 id="modal-title">${esc(m.title)}</h2></div>
+    <div class="m-body">${m.body}${m.error ? `<div class="m-error" role="alert">${m.error.map(x => `<div>✗ ${esc(x)}</div>`).join('')}</div>` : ''}</div>
+    <div class="m-foot">
+      <button class="paper-btn" id="modal-cancel" data-act="modal-cancel" ${m.busy ? 'disabled' : ''}>Cancel</button>
+      <button class="paper-btn solid ${m.danger ? 'danger' : ''}" id="modal-ok" data-act="modal-ok" ${m.busy ? 'disabled' : ''}>${m.busy ? 'Working…' : esc(m.ok)}</button>
+    </div>`;
+}
+function renderPalette(m) {
+  const rows = paletteRows(m.q);
+  m.active = Math.min(m.active, Math.max(0, rows.length - 1));
+  const list = rows.map((r, k) => `<li class="pal-row ${k === m.active ? 'active' : ''} ${r.id === 'ask' ? 'ask' : ''}" role="option" id="pal-${k}" aria-selected="${k === m.active}" data-act="pal-run" data-k="${k}">
+      ${r.id === 'ask' ? `<span class="pal-ico">${SPARK}</span><span class="pal-l">Ask Claude <span class="pal-q">“${esc(r.detail)}”</span></span><span class="kbd">↵</span>` : `<span class="pal-ico">›</span><span class="pal-l">${esc(r.label)}</span>${r.key ? `<span class="kbd">${esc(r.key)}</span>` : ''}`}
+    </li>`).join('');
+  return `<h2 id="modal-title" class="sr-only">Commands</h2>
+    <div class="pal-input"><span aria-hidden="true">&gt;</span><input id="paletteinput" value="${esc(m.q)}" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="true" aria-controls="pal-list" aria-activedescendant="pal-${m.active}" aria-label="Type a command or ask Claude" placeholder="Type a command, or ask Claude to change the week"></div>
+    <ul class="pal-list" id="pal-list" role="listbox">${list}</ul>
+    <div class="pal-foot">${m.q.trim() ? '' : '<span>Try <em>“move Tuesday\'s issues to Dev - Internal”</em></span>'}<span><span class="kbd">↑↓</span> move <span class="kbd">↵</span> run <span class="kbd">esc</span> close</span></div>`;
+}
+function renderAssist(m) {
+  const bubble = (who, text) => `<div class="a-turn ${who}"><span class="a-who">${who === 'you' ? 'You' : `${SPARK} Claude`}</span><div>${esc(text)}</div></div>`;
+  const past = m.turns.map(t => bubble('you', t.message) + bubble('claude', t.reply)).join('');
+  let now = '';
+  if (m.status === 'thinking') now = `<div class="a-turn claude"><span class="a-who">${SPARK} Claude</span><div class="a-wait">Reading your week<span class="dots"><i>.</i><i>.</i><i>.</i></span></div></div>`;
+  else if (m.status === 'error') now = `<div class="m-error" role="alert">✗ ${esc(m.reply)}</div>`;
+  else {
+    now = bubble('claude', m.reply || 'Here is what I would change.');
+    if (m.summary.length) now += `<div class="a-changes"><div class="a-label">Changes</div><ul>${m.summary.map(x => `<li>${esc(x)}</li>`).join('')}</ul>${m.remote.length ? `<div class="m-faint">${plural(m.remote.length, 'issue')} ${m.remote.length === 1 ? 'is' : 'are'} already in Linear. You confirm ${m.remote.length === 1 ? 'that delete' : 'those deletes'} next.</div>` : ''}</div>`;
+  }
+  const canType = m.status !== 'thinking' && m.status !== 'applying';
+  return `<div class="m-head"><h2 id="modal-title">${SPARK} Ask Claude</h2><span class="m-faint">Week ${weekNo(state.week)}</span><button class="m-x" data-act="modal-cancel" aria-label="Close" ${m.busy ? 'disabled' : ''}>×</button></div>
+    <div class="m-body a-log" data-keep-scroll="assist">${past}${bubble('you', m.message)}${now}</div>
+    <div class="m-foot a-foot">
+      ${m.status === 'thinking' ? '<span class="m-faint">This takes about 10 seconds.</span><button class="paper-btn" id="assist-cancel" data-act="modal-cancel">Cancel</button>' : ''}
+      ${m.status === 'answer' || m.status === 'applying' ? `<button class="paper-btn" data-act="modal-cancel" ${m.busy ? 'disabled' : ''}>Discard</button><button class="paper-btn solid" id="assist-apply" data-act="assist-apply" ${m.busy ? 'disabled' : ''}>${m.status === 'applying' ? 'Applying…' : 'Apply'}</button>` : ''}
+      ${m.status === 'error' ? `<button class="paper-btn" id="assist-retry" data-act="assist-retry">Try again</button>` : ''}
+    </div>
+    ${canType ? `<div class="pal-input a-input"><span aria-hidden="true">&gt;</span><input id="assistinput" autocomplete="off" spellcheck="false" aria-label="Reply to Claude" placeholder="${m.status === 'answer' ? 'Not quite? Say what to change' : 'Ask for something else'}"></div>` : ''}
+    <div class="pal-foot"><span>Nothing changes until you press Apply.</span></div>`;
 }
 
 function renderView() {
@@ -371,7 +642,24 @@ function renderView() {
 // ---------- week ----------
 function renderWeek() {
   const feed = !state.fed; state.fed = true;
-  $('#view').innerHTML = `<div class="grid">${renderSetup()}${renderReceipt(feed)}${renderEditor()}</div>`;
+  $('#view').innerHTML = `<div class="grid ${state.picked.size ? 'picking' : ''}">${renderSetup()}${renderReceipt(feed)}${renderEditor()}</div>${renderBulk()}`;
+}
+
+function renderBulk() {
+  const its = pickedItems();
+  if (!its.length) return '';
+  const pushed = its.filter(isFrozen).length;
+  const same = f => { const v = new Set(its.map(i => i[f])); return v.size === 1 ? [...v][0] : null; };
+  const days = weekDays(state.draft.week);
+  return `<div class="bulk" role="toolbar" aria-label="Change the picked issues">
+    <span class="bulk-count"><strong>${its.length}</strong> picked</span>
+    <div class="bulk-sel">${select('bulk-project', projectOptions(), same('project'), v => bulkSet('project', v), { placeholder: 'Move to project', label: 'Move picked issues to a project', disabled: pushed > 0 })}</div>
+    <div class="bulk-sel">${select('bulk-day', days.map(x => ({ v: x, label: dname(x), hint: state.draft.days.includes(x) ? '' : 'not counted' })), same('day'), v => bulkSet('day', v), { placeholder: 'Move to day', label: 'Move picked issues to a day', disabled: pushed > 0 })}</div>
+    <button class="btn" data-act="bulk-merge" ${pushed || its.length < 2 ? 'disabled' : ''}>Merge</button>
+    <button class="btn danger" data-act="bulk-delete">Delete</button>
+    <button class="btn ghost" data-act="bulk-clear">Clear <span class="kbd">esc</span></button>
+    ${pushed ? `<span class="bulk-note">${pushed} ${pushed === 1 ? 'is' : 'are'} already in Linear, so only Delete works.</span>` : ''}
+  </div>`;
 }
 
 function renderSetup() {
@@ -388,7 +676,7 @@ function renderSetup() {
     <section class="col-setup" aria-label="Week setup">
       <div>
         <h1>${d.pushed ? `Week ${weekNo(d.week)} is printed` : 'Your week, itemised'}</h1>
-        <p class="lede">${act.length ? `${plural(act.length, 'line')} across ${plural(projects, 'project')}, from ${plural(sessions, 'Claude session')} and ${plural(commits, 'commit')}.` : 'Nothing drafted for this week yet.'}</p>
+        <p class="lede">${act.length ? `${plural(act.length, 'issue')} across ${plural(projects, 'project')}, from ${plural(sessions, 'Claude session')} and ${plural(commits, 'commit')}.` : 'Nothing drafted for this week yet.'}</p>
       </div>
       <div>
         <label class="label" for="total">Hours you worked</label>
@@ -443,8 +731,8 @@ function renderReceipt(feed) {
           <div class="dash"></div>
         </div>
         <div class="paper-scroll" data-keep-scroll="receipt">
-          ${act.length ? groupedDays().map(renderDay).join('') : '<div class="empty">No lines yet.<br>Run <strong>/timesheet</strong> in Claude to draft this week, or add a line by hand.</div>'}
-          ${state.adding ? renderAddForm() : '<div style="padding:6px 0 10px"><button class="paper-btn" style="width:100%" data-act="add">+ Add a line by hand <span style="color:var(--ink-2)">(a)</span></button></div>'}
+          ${act.length ? groupedDays().map(renderDay).join('') : '<div class="empty">No issues yet.<br>Run <strong>/timesheet</strong> in Claude to draft this week, or add an issue by hand.</div>'}
+          ${state.adding ? renderAddForm() : '<div style="padding:6px 0 10px"><button class="paper-btn" style="width:100%" data-act="add">+ Add an issue by hand <span style="color:var(--ink-2)">(a)</span></button></div>'}
         </div>
         <div class="paper-foot">
           <div class="dash"></div>
@@ -463,9 +751,13 @@ function renderReceipt(feed) {
 
 function renderDay(day) {
   const open = !state.collapsed.has(day.day);
-  const head = `<button class="r-dayhead" data-act="collapse" data-d="${esc(day.day)}" ${day.counted ? `data-dropday="${esc(day.day)}"` : ''} aria-expanded="${open}"><span><span class="chev">▾</span>${dname(day.day)}${day.counted ? '' : ' (not counted)'}<span class="meta">${plural(day.count, 'line')}</span></span><span>${fmt(day.total)}</span></button>`;
-  if (!open) return `<div class="r-day">${head}</div>`;
-  return `<div class="r-day">${head}${day.groups.map(g => {
+  const head = `<button class="r-dayhead" data-act="collapse" data-d="${esc(day.day)}" ${day.counted ? `data-dropday="${esc(day.day)}"` : ''} aria-expanded="${open}"><span><span class="chev">▾</span>${dname(day.day)}${day.counted ? '' : ' (not counted)'}<span class="meta">${plural(day.count, 'issue')}</span></span><span>${fmt(day.total)}</span></button>`;
+  const ids = day.groups.flatMap(g => g.items.map(i => i.id));
+  const n = ids.filter(id => state.picked.has(id)).length;
+  const check = ids.length ? `<button class="r-check ${n && n < ids.length ? 'some' : ''}" data-act="pick-day" data-d="${esc(day.day)}" role="checkbox" aria-checked="${n === 0 ? 'false' : n === ids.length ? 'true' : 'mixed'}" aria-label="Pick every issue on ${dname(day.day)}"></button>` : '';
+  const top = `<div class="r-row">${check}${head}</div>`;
+  if (!open) return `<div class="r-day">${top}</div>`;
+  return `<div class="r-day">${top}${day.groups.map(g => {
     const parent = g.key ? state.draft.parents.find(p => p.key === `${day.day}|${g.key}`) : null;
     const label = g.key ? esc(parentTitle(day.day, g.key)) : 'No project yet';
     return `<div class="r-parent"><span class="swatch" style="background:${g.key ? color(g.key) : 'var(--bad-ink)'}"></span><span>${label}</span>${parent?.linear?.created ? `<span class="pid">${linearLink(parent.linear)}</span>` : ''}</div>
@@ -476,8 +768,9 @@ function renderDay(day) {
 function renderLine(i) {
   const cls = ['r-line', i.id === state.sel ? 'sel' : '', i.project ? '' : 'unassigned', isPushed(i) ? 'pushed' : '', state.mergeFrom === i.id ? 'mark-merge' : ''].filter(Boolean).join(' ');
   const hours = `${isPushed(i) && i.linear.identifier ? `${esc(i.linear.identifier)} ` : ''}${i.locked ? '* ' : ''}${fmt(i.hours)}`;
-  return `<button class="${cls}" data-act="pick" data-id="${esc(i.id)}" aria-pressed="${i.id === state.sel}" draggable="${!isFrozen(i)}">
-    <span class="t">${esc(i.title)}</span><span class="lead"></span><span class="h ${state.flash.has(i.id) ? 'flash' : ''}">${hours}</span></button>`;
+  const picked = state.picked.has(i.id);
+  return `<div class="r-row ${picked ? 'picked' : ''}"><button class="r-check" data-act="pick-toggle" data-id="${esc(i.id)}" role="checkbox" aria-checked="${picked}" aria-label="Pick ${esc(i.title)}"></button><button class="${cls}" data-act="pick" data-id="${esc(i.id)}" aria-pressed="${i.id === state.sel}" draggable="${!isFrozen(i)}">
+    <span class="t">${esc(i.title)}</span><span class="lead"></span><span class="h ${state.flash.has(i.id) ? 'flash' : ''}">${hours}</span></button></div>`;
 }
 
 function renderAddForm() {
@@ -490,21 +783,21 @@ function renderAddForm() {
       <div>${select('add-project', projectOptions(), state.addProject ?? projectNames()[0], v => { state.addProject = v; }, { paper: true, label: 'Project' })}</div>
       <div>${select('add-day', days.map(x => ({ v: x, label: dname(x) })), dayNow, v => { state.addDay = v; }, { paper: true, label: 'Day' })}</div>
     </div>
-    <div class="two"><button class="paper-btn solid" type="submit">Add line</button><button class="paper-btn" type="button" data-act="cancel-add">Cancel</button></div>
+    <div class="two"><button class="paper-btn solid" type="submit">Add issue</button><button class="paper-btn" type="button" data-act="cancel-add">Cancel</button></div>
   </form>`;
 }
 
 function renderEditor() {
   const it = findItem(state.sel);
-  if (!it) return '<section class="col-editor" aria-label="Line editor"><h1 style="font-size:20px">No line selected</h1><p class="muted" style="margin:0">Pick a line on the receipt, or add one by hand.</p></section>';
+  if (!it) return '<section class="col-editor" aria-label="Issue editor"><h1 style="font-size:20px">No issue selected</h1><p class="muted" style="margin:0">Pick an issue on the receipt, or add one by hand.</p></section>';
   const ro = isPushed(it), frozen = isFrozen(it);
   const others = live().filter(i => i.id !== it.id && !isFrozen(i));
   const days = weekDays(state.draft.week);
   const ev = it.evidence;
   const f = `data-for="${esc(it.id)}"`;
   return `
-    <section class="col-editor" aria-label="Line editor" data-keep-scroll="editor">
-      <div class="ed-head"><span class="faint">${dname(it.day)} line</span>${ro ? `<span class="chip">in Linear as <span class="linear-id">${linearLink(it.linear)}</span></span>` : (it.locked ? '<span class="chip">locked</span>' : '')}</div>
+    <section class="col-editor" aria-label="Issue editor" data-keep-scroll="editor">
+      <div class="ed-head"><span class="faint">${dname(it.day)} issue</span>${ro ? `<span class="chip">in Linear as <span class="linear-id">${linearLink(it.linear)}</span></span>` : (it.locked ? '<span class="chip">locked</span>' : '')}</div>
       ${ro ? `<p class="muted" style="margin:0">Already in Linear${it.everhour?.logged ? ' and Everhour' : ''}, so it can't change here.</p>` : ''}
       <div><label class="label" for="ed-title">Title, 2 to 3 words</label><input class="ed-input" id="ed-title" ${f} value="${esc(it.title)}" autocomplete="off" ${ro ? 'disabled' : ''}></div>
       <div><label class="label" for="ed-desc">What you did</label><textarea class="ed-text" id="ed-desc" ${f} ${ro ? 'disabled' : ''}>${esc(it.description)}</textarea></div>
@@ -521,7 +814,7 @@ function renderEditor() {
           <button class="icon-btn" data-act="more" aria-label="Half an hour more" ${frozen ? 'disabled' : ''}>+</button>
           <button class="btn" data-act="lock" aria-pressed="${it.locked}" ${ro ? 'disabled' : ''}>${it.locked ? 'Unlock' : 'Lock'}</button>
         </div>
-        <div class="faint" style="margin-top:6px">${it.locked ? 'Locked. Itemise leaves these hours alone.' : 'Changing hours locks the line and rebalances the rest.'}</div>
+        <div class="faint" style="margin-top:6px">${it.locked ? 'Locked. Itemise leaves these hours alone.' : 'Changing hours locks the issue and rebalances the rest.'}</div>
       </div>
       <div class="divider"></div>
       <div>
@@ -529,10 +822,10 @@ function renderEditor() {
         <div class="chips">${ev.manual ? '<span class="chip">added by hand</span>' : `<span class="chip">${plural(ev.commits.length, 'commit')}</span><span class="chip">${plural(ev.sessions.length, 'Claude session')}</span>`}${it.edited && !ev.manual ? '<span class="chip">edited by you</span>' : ''}</div>
         <div class="faint" style="margin-top:6px">${it.weight != null ? `Effort ${Math.round(it.weight * 10) / 10} of 10${it.weightReason ? `: ${esc(it.weightReason)}` : ''}.` : 'Effort not estimated yet.'}</div>
       </div>
-      ${frozen ? '' : `<div class="actions">
-        <div class="wide">${select('ed-merge', others.map(o => ({ v: o.id, label: o.title, hint: dname(o.day).slice(0, 3), color: o.project ? color(o.project) : 'var(--bad-ink)' })), null, v => mergeInto(it.id, v), { placeholder: 'Merge another line into this one', label: 'Merge another line into this one', disabled: !others.length })}</div>
+      ${frozen ? `<div class="actions"><button class="btn danger" data-act="delete-pushed">Delete issue</button><span class="faint">Trashes it in Linear and clears its Everhour time. You confirm first.</span></div>` : `<div class="actions">
+        <div class="wide">${select('ed-merge', others.map(o => ({ v: o.id, label: o.title, hint: dname(o.day).slice(0, 3), color: o.project ? color(o.project) : 'var(--bad-ink)' })), null, v => mergeInto(it.id, v), { placeholder: 'Merge another issue into this one', label: 'Merge another issue into this one', disabled: !others.length })}</div>
         <button class="btn" data-act="split">Split in two <span class="kbd">s</span></button>
-        <button class="btn danger ${state.armedDelete === it.id ? 'armed' : ''}" data-act="delete">${state.armedDelete === it.id ? 'Press again' : 'Delete line'}</button>
+        <button class="btn danger ${state.armedDelete === it.id ? 'armed' : ''}" data-act="delete">${state.armedDelete === it.id ? 'Press again' : 'Delete issue'}</button>
       </div>`}
     </section>`;
 }
@@ -710,7 +1003,7 @@ function renderPrint() {
           ${step('parents', 1, 'Parent issues in Linear', 'One per day and project, assigned to you, set to Done.')}
           ${step('issues', 2, 'Sub-issues in Linear', 'Each under its day. No hours in any title or description.')}
           ${step('sync', 3, 'Sync in Everhour', status === 'awaiting_sync' ? `${plural((p.missing ?? []).length, 'issue')} aren't in Everhour yet.` : 'Everhour finds every sub-issue.')}
-          ${step('time', 4, 'Hours on each sub-issue', 'Logged on the day each line belongs to.')}
+          ${step('time', 4, 'Hours on each sub-issue', 'Logged on the day each issue belongs to.')}
         </ol>` : ''}
         ${panel}
       </section>
@@ -762,7 +1055,7 @@ function renderHistory() {
             <span style="flex:1"></span>
             ${parts.length ? `<span class="stack-bar">${parts.map(([pn, h]) => `<span title="${esc(pn)}" style="width:${w.total ? (h / w.total) * 100 : 0}%;background:${color(pn)}"></span>`).join('')}</span>` : ''}
             <span class="big">${fmt(w.total)} h</span>
-            <span style="font-size:13px">${plural(w.items, 'line')}, ${w.pushed ? 'printed' : 'draft'}</span>
+            <span style="font-size:13px">${plural(w.items, 'issue')}, ${w.pushed ? 'printed' : 'draft'}</span>
           </button>`;
         }).join('') : '<p class="hist-empty">No weeks drafted yet. Run /timesheet in Claude to draft one.</p>'}
       </div>
@@ -863,17 +1156,6 @@ function switchTab(tab) {
   if (tab === 'settings') return openSettings();
   state.tab = 'week'; state.print = null; state.fed = false; render();
 }
-function runCommand(text) {
-  const [cmd, arg] = text.trim().split(/\s+/);
-  state.palette = false; render();
-  if (cmd === 'distribute' || cmd === 'itemise') distribute(false);
-  else if (cmd === 'reweight') distribute(true);
-  else if (cmd === 'push' || cmd === 'print') { state.tab = 'week'; requestPush(); }
-  else if (cmd === 'week' && arg) goWeek(arg);
-  else if (cmd === 'week' || cmd === 'history' || cmd === 'settings') switchTab(cmd);
-  else if (cmd) toast(`Unknown command: ${cmd}`);
-}
-
 // ---------- events ----------
 document.addEventListener('click', e => {
   const t = e.target.closest('[data-act]');
@@ -890,8 +1172,20 @@ document.addEventListener('click', e => {
     case 'prev': case 'next': goWeek(shiftWeek(state.week, a === 'prev' ? -1 : 1)); break;
     case 'open-week': goWeek(t.dataset.w); break;
     case 'collapse': { const d = t.dataset.d; if (state.collapsed.has(d)) state.collapsed.delete(d); else state.collapsed.add(d); render(); break; }
+    case 'pick-toggle': togglePick(t.dataset.id, e.shiftKey); break;
+    case 'pick-day': pickDay(t.dataset.d); break;
+    case 'bulk-merge': bulkMerge(); break;
+    case 'bulk-delete': { const its = pickedItems(); if (its.length === 1 && !isFrozen(its[0])) { act('/api/delete', { id: its[0].id }).then(d => d && toast("Issue deleted. /timesheet won't redraft it.")); } else requestDelete(its.map(i => i.id)); break; }
+    case 'bulk-clear': clearPicked(); break;
+    case 'delete-pushed': if (it) requestDelete([it.id]); break;
+    case 'modal-back': case 'modal-cancel': closeModal(); break;
+    case 'modal-ok': runConfirm(); break;
+    case 'pal-run': runPaletteRow(+t.dataset.k); break;
+    case 'assist-apply': applyAssist(); break;
+    case 'assist-retry': { const m = state.modal; if (m?.kind === 'assist') askClaude(m.message, m.turns); break; }
     case 'pick': {
       const id = t.dataset.id;
+      if (e.shiftKey || e.metaKey || e.ctrlKey) { togglePick(id, e.shiftKey); break; }
       if (state.mergeFrom && state.mergeFrom !== id && t.classList.contains('r-line')) { const target = findItem(id); if (target && !isFrozen(target)) { mergeInto(state.mergeFrom, id); break; } }
       selectLine(id);
       break;
@@ -938,7 +1232,36 @@ document.addEventListener('submit', e => {
   submitAdd();
 });
 
+/** Keys while a modal is open: Esc closes, Tab stays inside, the palette moves with arrows and runs on Enter. */
+function modalKey(e) {
+  const m = state.modal;
+  if (e.key === 'Escape') { e.preventDefault(); return closeModal(); }
+  if (e.key === 'Tab') {
+    const f = [...document.querySelectorAll('.modal button:not([disabled]), .modal input')];
+    if (!f.length) return;
+    const k = f.indexOf(document.activeElement);
+    e.preventDefault();
+    f[(k + (e.shiftKey ? -1 : 1) + f.length) % f.length].focus();
+    return;
+  }
+  if (m.kind === 'palette' && e.target.id === 'paletteinput') {
+    const n = paletteRows(m.q).length;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); m.active = (m.active + (e.key === 'ArrowDown' ? 1 : -1) + n) % Math.max(1, n); renderOverlay(); $('#paletteinput')?.focus(); }
+    else if (e.key === 'Enter') { e.preventDefault(); runPaletteRow(m.active); }
+    return;
+  }
+  if (m.kind === 'assist' && e.target.id === 'assistinput' && e.key === 'Enter') { e.preventDefault(); followUp(e.target.value); }
+}
+
+document.addEventListener('input', e => {
+  if (e.target.id !== 'paletteinput' || state.modal?.kind !== 'palette') return;
+  state.modal.q = e.target.value; state.modal.active = 0;
+  render();
+});
+
 document.addEventListener('keydown', e => {
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); return state.modal?.kind === 'palette' ? closeModal() : openPalette(); }
+  if (state.modal) return modalKey(e);
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   const tag = e.target.tagName;
   if (state.openSel) {
@@ -950,11 +1273,6 @@ document.addEventListener('keydown', e => {
     return;
   }
   if (TEXT_TAGS.includes(tag)) {
-    if (e.target.id === 'paletteinput') {
-      if (e.key === 'Enter') { e.preventDefault(); runCommand(e.target.value); }
-      else if (e.key === 'Escape') { state.palette = false; render(); }
-      return;
-    }
     if (e.key === 'Escape') { if (e.target.closest('#addform')) { state.adding = false; render(); } else e.target.blur(); }
     if (e.key === 'Enter' && tag === 'INPUT' && e.target.closest('.col-editor, .col-setup')) e.target.blur();
     return;
@@ -966,8 +1284,12 @@ document.addEventListener('keydown', e => {
     if (k === 'n' || k === 'Escape') { e.preventDefault(); toast('Not printed.'); return closePrint(); }
   }
   if (k === '?') { state.help = !state.help; return renderOverlay(); }
-  if (k === '/') { e.preventDefault(); state.palette = true; state.help = false; render(); return $('#paletteinput')?.focus(); }
-  if (k === 'Escape') { state.help = false; state.mergeFrom = null; state.armedDelete = null; if (state.print) return closePrint(); return render(); }
+  if (k === '/') { e.preventDefault(); return openPalette(); }
+  if (k === 'Escape') {
+    if (state.help) { state.help = false; return renderOverlay(); }
+    if (state.picked.size && !state.print) return clearPicked();
+    state.mergeFrom = null; state.armedDelete = null; if (state.print) return closePrint(); return render();
+  }
   if (state.tab !== 'week' || state.print || !state.draft) return;
   const lines = visibleLines();
   const it = findItem(state.sel);
@@ -984,12 +1306,14 @@ document.addEventListener('keydown', e => {
   else if (k === 's' && editable) splitLine(it);
   else if (k === 'm' && editable) toggleMark(it);
   else if (k === 'd' && editable) deleteLine(it);
+  else if (k === 'd' && it) requestDelete([it.id]);
+  else if (k === 'x' && it) togglePick(it.id);
   else if (k === 'a') { e.preventDefault(); openAdd(); }
   else if (k === 'D') distribute(false);
   else if (k === 'P') requestPush();
 });
 
-// drag a line onto a counted day's heading to move it there
+// drag an issue onto a counted day's heading to move it there
 document.addEventListener('dragstart', e => { const r = e.target.closest?.('.r-line'); if (r) e.dataTransfer.setData('text/plain', r.dataset.id); });
 document.addEventListener('dragover', e => { const h = e.target.closest?.('[data-dropday]'); if (h) { e.preventDefault(); h.classList.add('drop'); } });
 document.addEventListener('dragleave', e => { e.target.closest?.('[data-dropday]')?.classList.remove('drop'); });
@@ -1005,7 +1329,7 @@ document.addEventListener('drop', e => {
 /** True while the person is typing somewhere a reload would wipe. */
 function isEditing() {
   const ae = document.activeElement;
-  return state.adding || !!state.openSel || state.palette || (!!ae && TEXT_TAGS.includes(ae.tagName));
+  return state.adding || !!state.openSel || !!state.modal || (!!ae && TEXT_TAGS.includes(ae.tagName));
 }
 
 setInterval(async () => {
