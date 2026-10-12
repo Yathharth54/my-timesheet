@@ -71,6 +71,7 @@ export function applyOps(input: Draft, ops: Op[], projectNames: string[]): OpsRe
         if (op.title !== undefined && !String(op.title).trim()) throw new Error("A title can't be empty.");
         if (op.description !== undefined && !String(op.description).trim()) throw new Error("A description can't be empty.");
         if (op.project === undefined && op.day === undefined && op.title === undefined && op.description === undefined) throw new Error('A set op needs project, day, title or description.');
+        const names = items.map(ref); // before any rename
         for (const item of items) {
           const before = structuredClone(item);
           if (op.project !== undefined) item.project = op.project;
@@ -84,9 +85,9 @@ export function applyOps(input: Draft, ops: Op[], projectNames: string[]): OpsRe
           op.project !== undefined && `to ${op.project}`,
           op.day !== undefined && `to ${weekdayName(op.day)}`,
         ].filter(Boolean).join(' and ');
-        if (what) summary.push(`Move ${list.length === 1 ? ref(items[0]) : plural(list.length, 'issue')} ${what}`);
-        if (op.title !== undefined) summary.push(`Rename ${ref(items[0])} to "${items[0].title}"`);
-        if (op.description !== undefined) summary.push(`Rewrite what ${ref(items[0])} says`);
+        if (what) summary.push(`Move ${list.length === 1 ? names[0] : plural(list.length, 'issue')} ${what}`);
+        if (op.title !== undefined) summary.push(`Rename ${names[0]} to "${items[0].title}"`);
+        if (op.description !== undefined) summary.push(`Rewrite what ${names[0]} says`);
         break;
       }
       case 'hours': {

@@ -27,6 +27,7 @@ describe('applyOps', () => {
     const r = applyOps(draft(), [{ op: 'set', ids: ['a'], title: 'Better name' }], P);
     expect(r.draft.items[0]).toMatchObject({ title: 'Better name', edited: true });
     expect(r.examples.map(e => e.kind)).toEqual(['rewrite']);
+    expect(r.summary).toEqual(['Rename "Alpha" to "Better name"']);
     expect(() => applyOps(draft(), [{ op: 'set', ids: ['a', 'b'], title: 'X' }], P)).toThrow(/one issue at a time/);
   });
 

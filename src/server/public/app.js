@@ -437,7 +437,7 @@ async function runConfirm() {
 
 const COMMANDS = [
   { id: 'itemise', label: 'Itemise hours', key: 'D', words: 'distribute split total', run: () => distribute(false) },
-  { id: 'reweight', label: 'Re-estimate effort and itemise', words: 'reweight weights', run: () => distribute(true) },
+  { id: 'reweight', label: 'Estimate effort again and itemise', words: 'reweight weights re-estimate', run: () => distribute(true) },
   { id: 'print', label: 'Print to Linear and Everhour', key: 'P', words: 'push send', run: () => { state.tab = 'week'; requestPush(); } },
   { id: 'add', label: 'Add an issue by hand', key: 'a', words: 'new manual', run: () => { if (state.tab !== 'week') switchTab('week'); openAdd(); } },
   { id: 'pick-all', label: 'Pick every issue', words: 'select all bulk', run: () => { state.tab = 'week'; state.picked = new Set(live().map(i => i.id)); render(); } },
@@ -601,10 +601,10 @@ function renderPalette(m) {
   const rows = paletteRows(m.q);
   m.active = Math.min(m.active, Math.max(0, rows.length - 1));
   const list = rows.map((r, k) => `<li class="pal-row ${k === m.active ? 'active' : ''} ${r.id === 'ask' ? 'ask' : ''}" role="option" id="pal-${k}" aria-selected="${k === m.active}" data-act="pal-run" data-k="${k}">
-      ${r.id === 'ask' ? `<span class="pal-ico">${SPARK}</span><span class="pal-l">Ask Claude <span class="pal-q">“${esc(r.detail)}”</span></span><span class="kbd">↵</span>` : `<span class="pal-ico">›</span><span class="pal-l">${esc(r.label)}</span>${r.key ? `<span class="kbd">${esc(r.key)}</span>` : ''}`}
+      ${r.id === 'ask' ? `<span class="pal-ico">${SPARK}</span><span class="pal-l">Ask Claude <span class="pal-q">“${esc(r.detail)}”</span></span><span class="kbd">↵</span>` : `<span class="pal-l">${esc(r.label)}</span>${r.key ? `<span class="kbd">${esc(r.key)}</span>` : ''}`}
     </li>`).join('');
   return `<h2 id="modal-title" class="sr-only">Commands</h2>
-    <div class="pal-input"><span aria-hidden="true">&gt;</span><input id="paletteinput" value="${esc(m.q)}" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="true" aria-controls="pal-list" aria-activedescendant="pal-${m.active}" aria-label="Type a command or ask Claude" placeholder="Type a command, or ask Claude to change the week"></div>
+    <div class="pal-input"><svg width="18" height="18" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><circle cx="9" cy="9" r="6"/><path d="m13.5 13.5 4 4"/></svg><input id="paletteinput" value="${esc(m.q)}" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="true" aria-controls="pal-list" aria-activedescendant="pal-${m.active}" aria-label="Type a command or ask Claude" placeholder="Type a command, or ask Claude to change the week"></div>
     <ul class="pal-list" id="pal-list" role="listbox">${list}</ul>
     <div class="pal-foot">${m.q.trim() ? '' : '<span>Try <em>“move Tuesday\'s issues to Dev - Internal”</em></span>'}<span><span class="kbd">↑↓</span> move <span class="kbd">↵</span> run <span class="kbd">esc</span> close</span></div>`;
 }
@@ -621,13 +621,14 @@ function renderAssist(m) {
   const canType = m.status !== 'thinking' && m.status !== 'applying';
   return `<div class="m-head"><h2 id="modal-title">${SPARK} Ask Claude</h2><span class="m-faint">Week ${weekNo(state.week)}</span><button class="m-x" data-act="modal-cancel" aria-label="Close" ${m.busy ? 'disabled' : ''}>×</button></div>
     <div class="m-body a-log" data-keep-scroll="assist">${past}${bubble('you', m.message)}${now}</div>
+    ${canType ? `<div class="pal-input a-input"><input id="assistinput" autocomplete="off" spellcheck="false" aria-label="Reply to Claude" placeholder="${m.status === 'answer' ? 'Not quite? Say what to change' : 'Ask for something else'}"></div>` : ''}
     <div class="m-foot a-foot">
-      ${m.status === 'thinking' ? '<span class="m-faint">This takes about 10 seconds.</span><button class="paper-btn" id="assist-cancel" data-act="modal-cancel">Cancel</button>' : ''}
+      <span class="m-faint">${m.status === 'thinking' ? 'This takes about 10 seconds.' : m.status === 'answer' || m.status === 'applying' ? 'Nothing changes until you apply it.' : ''}</span>
+      ${m.status === 'thinking' ? '<button class="paper-btn" id="assist-cancel" data-act="modal-cancel">Cancel</button>' : ''}
       ${m.status === 'answer' || m.status === 'applying' ? `<button class="paper-btn" data-act="modal-cancel" ${m.busy ? 'disabled' : ''}>Discard</button><button class="paper-btn solid" id="assist-apply" data-act="assist-apply" ${m.busy ? 'disabled' : ''}>${m.status === 'applying' ? 'Applying…' : 'Apply'}</button>` : ''}
       ${m.status === 'error' ? `<button class="paper-btn" id="assist-retry" data-act="assist-retry">Try again</button>` : ''}
-    </div>
-    ${canType ? `<div class="pal-input a-input"><span aria-hidden="true">&gt;</span><input id="assistinput" autocomplete="off" spellcheck="false" aria-label="Reply to Claude" placeholder="${m.status === 'answer' ? 'Not quite? Say what to change' : 'Ask for something else'}"></div>` : ''}
-    <div class="pal-foot"><span>Nothing changes until you press Apply.</span></div>`;
+      ${m.status === 'note' ? '<button class="paper-btn" data-act="modal-cancel">Close</button>' : ''}
+    </div>`;
 }
 
 function renderView() {
@@ -652,11 +653,11 @@ function renderBulk() {
   const same = f => { const v = new Set(its.map(i => i[f])); return v.size === 1 ? [...v][0] : null; };
   const days = weekDays(state.draft.week);
   return `<div class="bulk" role="toolbar" aria-label="Change the picked issues">
-    <span class="bulk-count"><strong>${its.length}</strong> picked</span>
+    <span class="bulk-count"><strong>${its.length}</strong> picked</span><span class="bulk-sep" aria-hidden="true"></span>
     <div class="bulk-sel">${select('bulk-project', projectOptions(), same('project'), v => bulkSet('project', v), { placeholder: 'Move to project', label: 'Move picked issues to a project', disabled: pushed > 0 })}</div>
     <div class="bulk-sel">${select('bulk-day', days.map(x => ({ v: x, label: dname(x), hint: state.draft.days.includes(x) ? '' : 'not counted' })), same('day'), v => bulkSet('day', v), { placeholder: 'Move to day', label: 'Move picked issues to a day', disabled: pushed > 0 })}</div>
     <button class="btn" data-act="bulk-merge" ${pushed || its.length < 2 ? 'disabled' : ''}>Merge</button>
-    <button class="btn danger" data-act="bulk-delete">Delete</button>
+    <button class="btn danger" data-act="bulk-delete">Delete</button><span class="bulk-sep" aria-hidden="true"></span>
     <button class="btn ghost" data-act="bulk-clear">Clear <span class="kbd">esc</span></button>
     ${pushed ? `<span class="bulk-note">${pushed} ${pushed === 1 ? 'is' : 'are'} already in Linear, so only Delete works.</span>` : ''}
   </div>`;
@@ -670,44 +671,41 @@ function renderSetup() {
   const done = d.pushed && !unlogged().length;
   const eh = state.everhour === undefined ? 'Checking Everhour…'
     : state.everhour === null ? "Couldn't read Everhour for this week."
-      : `Everhour already has <strong style="color:var(--chalk)">${fmt(state.everhour)} h</strong> for you this week.`;
+      : `Everhour already has <strong style="color:var(--text);font-weight:600">${fmt(state.everhour)} h</strong> for you this week.`;
   const busy = !!state.busy;
+  const effort = d.weightsSource === 'claude' ? 'Effort estimated by Claude.' : d.weightsSource === 'heuristic' ? 'Effort estimated from commits and sessions.' : 'Effort not estimated yet.';
   return `
     <section class="col-setup" aria-label="Week setup">
       <div>
         <h1>${d.pushed ? `Week ${weekNo(d.week)} is printed` : 'Your week, itemised'}</h1>
         <p class="lede">${act.length ? `${plural(act.length, 'issue')} across ${plural(projects, 'project')}, from ${plural(sessions, 'Claude session')} and ${plural(commits, 'commit')}.` : 'Nothing drafted for this week yet.'}</p>
       </div>
-      <div>
-        <label class="label" for="total">Hours you worked</label>
+      <div class="setup-group">
+        <label class="label" for="total" style="margin:0">Hours you worked</label>
         <div class="total-row">
           <input class="total-input" id="total" inputmode="decimal" value="${esc(d.totalHours ?? '')}" placeholder="0" autocomplete="off">
           <button class="btn solid" data-act="itemise" ${busy || !act.length ? 'disabled' : ''}>${state.busy === 'itemise' ? 'Itemising…' : 'Itemise <span class="kbd">D</span>'}</button>
         </div>
+        <div class="faint">${effort} <button class="btn link" data-act="reweight" ${busy || !act.length ? 'disabled' : ''}>${state.busy === 'reweight' ? 'Estimating…' : 'Estimate again'}</button></div>
       </div>
-      <div style="display:flex;flex-direction:column;gap:6px">
-        <button class="btn block" data-act="reweight" ${busy || !act.length ? 'disabled' : ''}>${state.busy === 'reweight' ? 'Estimating effort…' : 'Re-estimate effort and itemise'}</button>
-        <span class="faint">Effort ${d.weightsSource === 'claude' ? 'estimated by Claude' : d.weightsSource === 'heuristic' ? 'estimated from commits and sessions' : 'not estimated yet'}.</span>
-      </div>
-      <div>
-        <span class="label">Days that count</span>
+      <div class="setup-group">
+        <span class="label" style="margin:0">Days that count</span>
         <div class="days">${all7.map(x => `<button class="day-btn ${d.days.includes(x) ? 'on' : ''}" data-act="day" data-d="${esc(x)}" aria-pressed="${d.days.includes(x)}" aria-label="${dname(x)}">${dname(x)[0]}</button>`).join('')}</div>
       </div>
-      <div class="divider"></div>
-      <div class="muted" style="font-size:14px">${eh}</div>
-      <div>
-        <span class="label">Before you print</span>
+      <div class="setup-group">
+        <span class="label" style="margin:0">Before you print</span>
         <div class="checks" aria-live="polite">
-          ${blocks().length ? '' : `<div class="check ok"><span class="ico">✓</span>${done ? 'Printed. Nothing left to do.' : 'Ready to print.'}</div>`}
+          ${blocks().length ? '' : `<div class="check ok"><span class="ico">✓</span><span>${done ? 'Printed. Nothing left to do.' : 'Ready to print.'}</span></div>`}
           ${state.warnings.map(w => {
-            const body = `<span class="ico">${w.level === 'block' ? '✗' : '!'}</span><span>${esc(w.message)}</span>`;
+            const body = `<span class="ico">${w.level === 'block' ? '✕' : '!'}</span><span>${esc(w.message)}</span>`;
             return w.itemId && findItem(w.itemId)
               ? `<button class="check ${esc(w.level)}" data-act="pick" data-id="${esc(w.itemId)}">${body}</button>`
               : `<div class="check ${esc(w.level)}">${body}</div>`;
           }).join('')}
         </div>
+        <div class="faint">${eh}</div>
       </div>
-      <div class="faint">Press <span class="kbd">?</span> for keyboard shortcuts, <span class="kbd">/</span> for commands.</div>
+      <div class="faint">Press <span class="kbd">/</span> for commands or to ask Claude, <span class="kbd">?</span> for shortcuts.</div>
     </section>`;
 }
 
@@ -732,7 +730,7 @@ function renderReceipt(feed) {
         </div>
         <div class="paper-scroll" data-keep-scroll="receipt">
           ${act.length ? groupedDays().map(renderDay).join('') : '<div class="empty">No issues yet.<br>Run <strong>/timesheet</strong> in Claude to draft this week, or add an issue by hand.</div>'}
-          ${state.adding ? renderAddForm() : '<div style="padding:6px 0 10px"><button class="paper-btn" style="width:100%" data-act="add">+ Add an issue by hand <span style="color:var(--ink-2)">(a)</span></button></div>'}
+          ${state.adding ? renderAddForm() : '<div class="add-line"><button class="paper-btn" data-act="add">+ Add an issue by hand</button></div>'}
         </div>
         <div class="paper-foot">
           <div class="dash"></div>
@@ -789,43 +787,50 @@ function renderAddForm() {
 
 function renderEditor() {
   const it = findItem(state.sel);
-  if (!it) return '<section class="col-editor" aria-label="Issue editor"><h1 style="font-size:20px">No issue selected</h1><p class="muted" style="margin:0">Pick an issue on the receipt, or add one by hand.</p></section>';
+  if (!it) return '<section class="col-editor" aria-label="Issue editor"><div class="ed-empty"><h2>No issue selected</h2><p class="muted" style="margin:0">Pick an issue on the receipt, or add one by hand.</p></div></section>';
   const ro = isPushed(it), frozen = isFrozen(it);
   const others = live().filter(i => i.id !== it.id && !isFrozen(i));
   const days = weekDays(state.draft.week);
   const ev = it.evidence;
   const f = `data-for="${esc(it.id)}"`;
+  const source = ev.manual ? '<span class="chip">Added by hand</span>' : `<span class="chip">${plural(ev.commits.length, 'commit')}</span><span class="chip">${plural(ev.sessions.length, 'Claude session')}</span>`;
   return `
     <section class="col-editor" aria-label="Issue editor" data-keep-scroll="editor">
-      <div class="ed-head"><span class="faint">${dname(it.day)} issue</span>${ro ? `<span class="chip">in Linear as <span class="linear-id">${linearLink(it.linear)}</span></span>` : (it.locked ? '<span class="chip">locked</span>' : '')}</div>
-      ${ro ? `<p class="muted" style="margin:0">Already in Linear${it.everhour?.logged ? ' and Everhour' : ''}, so it can't change here.</p>` : ''}
-      <div><label class="label" for="ed-title">Title, 2 to 3 words</label><input class="ed-input" id="ed-title" ${f} value="${esc(it.title)}" autocomplete="off" ${ro ? 'disabled' : ''}></div>
-      <div><label class="label" for="ed-desc">What you did</label><textarea class="ed-text" id="ed-desc" ${f} ${ro ? 'disabled' : ''}>${esc(it.description)}</textarea></div>
-      <div class="two-col">
-        <div><span class="label">Project</span>${select('ed-project', projectOptions(), it.project, v => setField(it, 'project', v), { disabled: ro, placeholder: 'Pick a project', label: 'Project' })}</div>
-        <div><span class="label">Day</span>${select('ed-day', days.map(x => ({ v: x, label: dname(x), hint: state.draft.days.includes(x) ? '' : 'not counted' })), it.day, v => setField(it, 'day', v), { disabled: ro, label: 'Day' })}</div>
+      <div class="ed-head"><span class="faint">${dname(it.day)}${it.project ? ` in ${esc(it.project)}` : ''}</span>${ro ? `<span class="chip">In Linear as <span class="linear-id">${linearLink(it.linear)}</span></span>` : (it.locked ? '<span class="chip">Hours locked</span>' : '')}</div>
+      <div class="ed-field">
+        <label class="sr-only" for="ed-title">Title</label>
+        <input class="ed-input" id="ed-title" ${f} value="${esc(it.title)}" autocomplete="off" ${ro ? 'disabled' : ''} ${ro ? 'aria-describedby="ed-title-hint"' : 'placeholder="Two or three words"'}>
+        ${ro ? `<span class="faint" id="ed-title-hint" style="margin-top:8px">Already in Linear${it.everhour?.logged ? ' and Everhour' : ''}, so only delete works on it.</span>` : ''}
       </div>
-      <div class="faint" style="margin-top:-6px">Why ${it.project ? esc(it.project) : 'unsure'}: ${esc(it.bucketReason || 'no reason given')}</div>
-      <div>
+      <div class="ed-field"><label class="label" for="ed-desc">What you did</label><textarea class="ed-text" id="ed-desc" ${f} ${ro ? 'disabled' : ''}>${esc(it.description)}</textarea></div>
+      <div class="ed-field">
+        <div class="two-col">
+          <div><span class="label">Project</span>${select('ed-project', projectOptions(), it.project, v => setField(it, 'project', v), { disabled: ro, placeholder: 'Pick a project', label: 'Project' })}</div>
+          <div><span class="label">Day</span>${select('ed-day', days.map(x => ({ v: x, label: dname(x), hint: state.draft.days.includes(x) ? '' : 'not counted' })), it.day, v => setField(it, 'day', v), { disabled: ro, label: 'Day' })}</div>
+        </div>
+        <span class="faint" style="margin-top:8px">${it.project ? `Why ${esc(it.project)}` : 'Why unsure'}: ${esc(it.bucketReason || 'no reason given')}</span>
+      </div>
+      <div class="ed-field">
         <span class="label">Hours</span>
         <div class="stepper">
           <button class="icon-btn" data-act="less" aria-label="Half an hour less" ${frozen ? 'disabled' : ''}>−</button>
           <span class="val ${state.flash.has(it.id) ? 'flash' : ''}">${fmt(it.hours)}</span>
           <button class="icon-btn" data-act="more" aria-label="Half an hour more" ${frozen ? 'disabled' : ''}>+</button>
-          <button class="btn" data-act="lock" aria-pressed="${it.locked}" ${ro ? 'disabled' : ''}>${it.locked ? 'Unlock' : 'Lock'}</button>
+          <button class="btn ghost" data-act="lock" aria-pressed="${it.locked}" ${ro ? 'disabled' : ''}>${it.locked ? 'Unlock' : 'Lock'}</button>
         </div>
-        <div class="faint" style="margin-top:6px">${it.locked ? 'Locked. Itemise leaves these hours alone.' : 'Changing hours locks the issue and rebalances the rest.'}</div>
+        <span class="faint" style="margin-top:8px">${it.locked ? 'Locked. Itemise leaves these hours alone.' : 'Changing hours locks them and rebalances the rest.'}</span>
+      </div>
+      <div class="ed-field">
+        <span class="label">Where it came from</span>
+        <div class="chips">${source}${it.edited && !ev.manual ? '<span class="chip">Edited by you</span>' : ''}</div>
+        <span class="faint" style="margin-top:8px">${it.weight != null ? `Effort ${Math.round(it.weight * 10) / 10} of 10${it.weightReason ? `: ${esc(it.weightReason)}` : ''}.` : 'Effort not estimated yet.'}</span>
       </div>
       <div class="divider"></div>
-      <div>
-        <span class="label">Where it came from</span>
-        <div class="chips">${ev.manual ? '<span class="chip">added by hand</span>' : `<span class="chip">${plural(ev.commits.length, 'commit')}</span><span class="chip">${plural(ev.sessions.length, 'Claude session')}</span>`}${it.edited && !ev.manual ? '<span class="chip">edited by you</span>' : ''}</div>
-        <div class="faint" style="margin-top:6px">${it.weight != null ? `Effort ${Math.round(it.weight * 10) / 10} of 10${it.weightReason ? `: ${esc(it.weightReason)}` : ''}.` : 'Effort not estimated yet.'}</div>
-      </div>
-      ${frozen ? `<div class="actions"><button class="btn danger" data-act="delete-pushed">Delete issue</button><span class="faint">Trashes it in Linear and clears its Everhour time. You confirm first.</span></div>` : `<div class="actions">
+      ${frozen ? `<div class="actions"><button class="btn danger" data-act="delete-pushed">Delete issue</button><span class="faint">Moves it to Linear's trash and clears its Everhour time. You confirm first.</span></div>` : `<div class="actions">
         <div class="wide">${select('ed-merge', others.map(o => ({ v: o.id, label: o.title, hint: dname(o.day).slice(0, 3), color: o.project ? color(o.project) : 'var(--bad-ink)' })), null, v => mergeInto(it.id, v), { placeholder: 'Merge another issue into this one', label: 'Merge another issue into this one', disabled: !others.length })}</div>
         <button class="btn" data-act="split">Split in two <span class="kbd">s</span></button>
-        <button class="btn danger ${state.armedDelete === it.id ? 'armed' : ''}" data-act="delete">${state.armedDelete === it.id ? 'Press again' : 'Delete issue'}</button>
+        <span class="spacer"></span>
+        <button class="btn danger ${state.armedDelete === it.id ? 'armed' : ''}" data-act="delete">${state.armedDelete === it.id ? 'Press again to delete' : 'Delete issue'}</button>
       </div>`}
     </section>`;
 }
@@ -998,7 +1003,7 @@ function renderPrint() {
   $('#view').innerHTML = `
     <div class="print">
       <section class="print-main">
-        <div><h1 style="font-size:36px">${headline}</h1><p class="lede" style="font-size:16px;max-width:54ch">${sub}</p></div>
+        <div><h1>${headline}</h1><p class="lede">${sub}</p></div>
         ${showSteps ? `<ol class="steps">
           ${step('parents', 1, 'Parent issues in Linear', 'One per day and project, assigned to you, set to Done.')}
           ${step('issues', 2, 'Sub-issues in Linear', 'Each under its day. No hours in any title or description.')}
@@ -1033,16 +1038,16 @@ async function openHistory() {
 }
 
 function renderHistory() {
-  if (!state.history) { $('#view').innerHTML = '<div style="padding-top:24px"><h1 style="font-size:36px">Past weeks</h1><p class="lede">Loading…</p></div>'; return; }
+  if (!state.history) { $('#view').innerHTML = '<div class="page"><div><h1>Past weeks</h1><p class="lede">Loading…</p></div></div>'; return; }
   const weeks = [...state.history].sort((a, b) => a.week.localeCompare(b.week));
   const max = Math.max(1, ...weeks.map(w => w.total));
   const printed = weeks.filter(w => w.pushed);
   const avg = printed.length ? printed.reduce((s, w) => s + w.total, 0) / printed.length : 0;
   const used = new Set(weeks.flatMap(w => Object.keys(w.byProject ?? {})));
   $('#view').innerHTML = `
-    <div style="padding-top:24px;display:flex;flex-direction:column;gap:22px">
-      <div style="display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-end;gap:20px">
-        <div><h1 style="font-size:36px">Past weeks</h1><p class="lede">Every week you've drafted. Taller receipts are longer weeks.</p></div>
+    <div class="page">
+      <div class="page-head">
+        <div><h1>Past weeks</h1><p class="lede">Every week you've drafted. Taller receipts are longer weeks.</p></div>
         <div><div style="font-family:var(--mono);font-weight:700;font-size:30px">${fmt(avg)} h</div><div class="faint">average over ${plural(printed.length, 'printed week')}</div></div>
       </div>
       <div class="hist">
@@ -1105,7 +1110,7 @@ async function removeProject(name) {
 
 function renderSettings() {
   const s = state.settings;
-  if (!s) { $('#view').innerHTML = '<div style="padding-top:24px"><h1 style="font-size:36px">Settings</h1><p class="lede">Loading…</p></div>'; return; }
+  if (!s) { $('#view').innerHTML = '<div class="page"><div><h1>Settings</h1><p class="lede">Loading…</p></div></div>'; return; }
   const billable = s.projects.filter(p => p.kind === 'billable');
   const repoOptions = r => {
     const opts = [{ v: '', label: 'Ask me each time' }, ...billable.map(p => ({ v: p.name, label: `Bills to ${p.name}`, color: color(p.name) }))];
@@ -1113,7 +1118,8 @@ function renderSettings() {
     return opts;
   };
   $('#view').innerHTML = `
-    <div style="padding-top:24px"><h1 style="font-size:36px">Settings</h1><p class="lede" style="max-width:58ch">What counts as work, where it bills, and when to remind you.</p></div>
+    <div class="page">
+    <div><h1>Settings</h1><p class="lede">What counts as work, where it bills, and when to remind you.</p></div>
     <div class="settings">
       <section class="slip" aria-label="Repos">
         <h2>Repos</h2>
@@ -1123,10 +1129,10 @@ function renderSettings() {
             <span class="repo-name" title="${esc(r.root)}">${r.class === 'work' && r.project ? `<span class="swatch" style="background:${color(r.project)}"></span>` : ''}<span>${esc(r.name ?? r.root)}</span></span>
             <div class="seg">${['work', 'personal', 'ignore'].map(c => `<button class="${r.class === c ? 'on' : ''}" data-act="repo-cls" data-k="${k}" data-c="${c}" aria-pressed="${r.class === c}">${c[0].toUpperCase() + c.slice(1)}</button>`).join('')}</div>
           </div>
-          ${r.class === 'work' ? select(`repo-${k}`, repoOptions(r), r.project ?? '', v => { r.project = v || undefined; saveSettings(); }, { paper: true, label: `Project for ${r.name ?? r.root}` }) : ''}
+          ${r.class === 'work' ? select(`repo-${k}`, repoOptions(r), r.project ?? '', v => { r.project = v || undefined; saveSettings(); }, { label: `Project for ${r.name ?? r.root}` }) : ''}
         </div>`).join('') : '<p>No repos seen yet. They show up after your first Claude session in one.</p>'}
       </section>
-      <div style="display:flex;flex-direction:column;gap:22px">
+      <div class="settings-col">
         <section class="slip" aria-label="Projects">
           <h2>Projects</h2>
           ${s.projects.map((p, k) => `<div class="slip-row inline"><span class="repo-name"><span class="swatch" style="background:${color(p.name)}"></span><span>${esc(p.name)}</span></span><div class="proj-actions"><div class="seg">${['billable', 'internal'].map(c => `<button class="${p.kind === c ? 'on' : ''}" data-act="proj-kind" data-k="${k}" data-c="${c}" aria-pressed="${p.kind === c}">${c[0].toUpperCase() + c.slice(1)}</button>`).join('')}</div><button class="proj-remove ${state.armedRemove === p.name ? 'armed' : ''}" data-act="proj-remove" data-k="${k}" aria-label="Remove ${esc(p.name)}">${state.armedRemove === p.name ? 'Press again' : 'Remove'}</button></div></div>`).join('')}
@@ -1142,6 +1148,7 @@ function renderSettings() {
         </section>
         <p class="faint" style="margin:0">Your Linear and Everhour keys live in the macOS Keychain. To change them, run timesheet init in a terminal.</p>
       </div>
+    </div>
     </div>`;
 }
 
