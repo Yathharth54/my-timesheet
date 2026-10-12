@@ -3,7 +3,7 @@
 Turn a week of Claude Code sessions and git commits into Linear issues with hours in Everhour, with a 10-minute review in between.
 
 ```
-npx my-timesheet init      # once: keys, projects, work orgs, hooks
+npx my-timesheet init      # once: keys, projects, hooks
 # …work all week…
 /timesheet                 # in Claude, on Sunday: drafts the week
 /timesheet review          # browser: edit, type your total, distribute, push
@@ -12,7 +12,7 @@ npx my-timesheet init      # once: keys, projects, work orgs, hooks
 ## How it works
 
 - **During the week:** a Stop hook writes one line per Claude turn to `~/.timesheet/log/`, for **work repos only**:
-  - a repo is work if a remote belongs to one of your work GitHub orgs;
+  - a repo is work if its GitHub remote is under TheAgenticAI (add more orgs in Settings);
   - any other repo is asked about once (Work / Personal / Ignore);
   - nothing is logged until you answer.
 - **`/timesheet`:** condenses those sessions and your commits. Claude drafts sub-issues grouped by day and project, each with a billable/internal reason.
@@ -65,7 +65,7 @@ Picked issues get a bar at the bottom: move to a project or day, copy to more da
 
 | | |
 |---|---|
-| `npx my-timesheet init` | first setup: keys, projects, work orgs, hooks |
+| `npx my-timesheet init` | first setup: keys, projects, hooks |
 | `timesheet review [--week last]` | open the review page |
 | `timesheet push [--week last]` | push from the terminal |
 | `timesheet status` | one-line summary |

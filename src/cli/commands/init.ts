@@ -29,6 +29,8 @@ function stablePackageRoot(): string {
   return path.join(execFileSync('npm', ['root', '-g'], { encoding: 'utf8' }).trim(), 'my-timesheet');
 }
 
+export const WORK_ORGS = ['TheAgenticAI'];
+
 export async function init(): Promise<void> {
   p.intro(pc.inverse(' my-timesheet '));
   const prev = loadConfig();
@@ -45,10 +47,19 @@ export async function init(): Promise<void> {
     required: true,
   })) as string[];
   const chosen = all.filter(pr => chosenIds.includes(pr.id));
-  const internalId = bail(await p.select({
-    message: 'Which one is internal (not billable)?',
+  const wasInternal = new Set(prev?.projects.filter(x => x.kind === 'internal').map(x => x.id) ?? []);
+  const internalIds = bail(await p.multiselect({
+    message: 'Which are internal (not billable)?',
     options: chosen.map(pr => ({ value: pr.id, label: pr.name })),
-    initialValue: chosen.find(pr => /internal/i.test(pr.name))?.id,
+    initialValues: chosen.filter(pr => wasInternal.has(pr.id) || (!wasInternal.size && /internal/i.test(pr.name))).map(pr => pr.id),
+    required: true,
+  })) as string[];
+  // general internal work (reviews, meetings with no repo) lands on one of them by default
+  const prevDefault = chosen.find(pr => pr.name === prev?.internalProject && internalIds.includes(pr.id))?.id;
+  const defaultInternalId = internalIds.length === 1 ? internalIds[0] : bail(await p.select({
+    message: 'Which internal project gets general internal work by default?',
+    options: chosen.filter(pr => internalIds.includes(pr.id)).map(pr => ({ value: pr.id, label: pr.name })),
+    initialValue: prevDefault ?? chosen.find(pr => internalIds.includes(pr.id) && /internal/i.test(pr.name))?.id ?? internalIds[0],
   })) as string;
   const statusName = bail(await p.text({ message: 'Status for created issues', initialValue: 'Done' }));
   const projects: ProjectConfig[] = [];
@@ -58,17 +69,15 @@ export async function init(): Promise<void> {
     const states = await linear.states(team.id);
     const st = states.find(s => s.name.toLowerCase() === statusName.toLowerCase());
     if (!st) throw new Error(`Team ${team.name} has no status "${statusName}". Available: ${states.map(s => s.name).join(', ')}`);
-    projects.push({ id: pr.id, name: pr.name, teamId: team.id, kind: pr.id === internalId ? 'internal' : 'billable', stateId: st.id, labelIds: [] });
+    projects.push({ id: pr.id, name: pr.name, teamId: team.id, kind: internalIds.includes(pr.id) ? 'internal' : 'billable', stateId: st.id, labelIds: [] });
   }
 
   const everhourKey = bail(await p.password({ message: 'Everhour API key (Everhour → Settings → Profile → API)' }));
   const eh = await step('Everhour', () => new Everhour(everhourKey).me(), v => `${pc.green('◇')} Everhour  ✓ user ${v.id}${v.linearConnected ? ' · linear integration active' : pc.yellow(' · Linear integration not detected')}`);
 
-  let orgs: string[] = [];
-  try { orgs = execFileSync('gh', ['api', 'user/orgs', '--jq', '.[].login'], { encoding: 'utf8' }).split('\n').filter(Boolean); } catch { /* gh missing */ }
-  const workOrgs = orgs.length
-    ? bail(await p.multiselect({ message: 'Which GitHub orgs are work?', options: orgs.map(o => ({ value: o, label: o })), initialValues: prev?.workOrgs ?? [], required: false })) as string[]
-    : bail(await p.text({ message: 'Work GitHub orgs (comma-separated)', initialValue: prev?.workOrgs.join(',') ?? '' })).split(',').map(s => s.trim()).filter(Boolean);
+  // Everyone using this works at The Agentic, so repos under that GitHub org are work. Settings can add more.
+  const workOrgs = prev?.workOrgs.length ? prev.workOrgs : [...WORK_ORGS];
+  p.log.info(`Repos under ${workOrgs.map(o => `github.com/${o}`).join(', ')} count as work. Any other repo is asked about once.`);
 
   const nudge = bail(await p.confirm({ message: 'Remind you on Sunday evening if the week is not pushed?', initialValue: prev?.nudge ?? false }));
 
@@ -80,7 +89,7 @@ export async function init(): Promise<void> {
     linear: { assigneeId: me.id, assigneeEmail: me.email },
     everhour: { userId: eh.id },
     projects,
-    internalProject: projects.find(x => x.kind === 'internal')!.name,
+    internalProject: chosen.find(pr => pr.id === defaultInternalId)!.name,
     workOrgs,
     gitEmails: [...new Set([gitEmail, me.email].filter(Boolean))],
     nudge,

@@ -5,7 +5,7 @@ import { fail } from './out.js';
 
 const HELP = `timesheet — turn your week into Linear issues + Everhour time
 
-  timesheet init                       set up keys, projects, orgs and hooks
+  timesheet init                       set up keys, projects and hooks
   timesheet review [--week W]          open the review UI (default: this week)
   timesheet push [--week W]            push the week to Linear and Everhour
   timesheet status [--week W]          one-line summary of a week

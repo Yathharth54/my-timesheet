@@ -30,5 +30,4 @@ export async function doctor(): Promise<void> {
   }
   line(fs.existsSync(path.join(claudeDir(), 'commands', 'timesheet.md')), '/timesheet command installed');
   line(has('claude'), 'claude CLI available (for weights)');
-  line(has('gh'), 'gh CLI available (for work orgs)');
 }
