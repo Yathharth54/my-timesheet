@@ -10,7 +10,7 @@ const cli = (args: string[], cwd = process.cwd()) =>
   spawnSync('node', [path.resolve('dist/cli/index.js'), ...args], { cwd, env: { ...process.env }, encoding: 'utf8' });
 
 describe('timesheet CLI', () => {
-  beforeAll(() => { execSync('npm run build', { stdio: 'ignore' }); });
+  beforeAll(() => { execSync('npm run build', { stdio: 'ignore' }); }, 120_000); // a full tsc build can pass vitest's 10 s hook default on a busy machine
   beforeEach(() => { tmpHome(); });
 
   it('prints help and fails clearly before init', () => {
